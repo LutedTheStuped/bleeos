@@ -18,9 +18,9 @@ start:
     mov si, msg_loading
     call print_string
 
-    ; Load kernel: 16 sectors starting at CHS 0,0,2 -> 0x0000:0x7E00
+    ; Load kernel: 32 sectors starting at CHS 0,0,2 -> 0x0000:0x7E00
     mov ah, 0x02                ; BIOS read sectors
-    mov al, 16                  ; sector count (8KB, plenty for kernel)
+    mov al, 32                  ; sector count (16KB, fits C kernel)
     mov ch, 0                   ; cylinder 0
     mov cl, 2                   ; start at sector 2 (sector 1 = bootloader)
     mov dh, 0                   ; head 0
