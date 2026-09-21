@@ -1,26 +1,32 @@
-# BleeOS — tiny x86 OS (32-bit protected mode + C)
+# BleeOS 0.3 — tiny x86 OS: ASM MBR + C boot manager + C shell
 
-MBR bootloader (`boot.asm`, 16-bit ASM) loads the kernel at `0x7E00`.
-`kernel_entry.asm` (ASM) enables A20, installs a flat GDT, sets `CR0.PE` and
-far-jumps into 32-bit protected mode, then calls `kernel_main()` in `kernel.c`,
-which implements the VGA shell (no BIOS after the switch).
+Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
+`CR0.PE`, far-jump to 32-bit) → `bootmenu.c` (C boot manager) →
+`kernel.c` + `shell.c` (C kernel shell). No BIOS calls after the mode switch.
 
 ## Layout
 
-- `boot.asm` — 512-byte MBR. BIOS `int 0x13` reads 32 sectors (sector 2+) to `0x7E00`, jumps to kernel.
-- `kernel_entry.asm` — real→protected trampoline + GDT, linked at `0x7E00`.
-- `kernel.c` — 32-bit C kernel: VGA driver (`0xB8000`), PS/2 keyboard polling (`0x60`/`0x64`), shell.
-- `linker.ld` — links kernel at `0x7E00`.
-- `Makefile` — builds `os.img` (1.44M floppy image).
+- `boot.asm` — 512-byte MBR. LBA→CHS loop over BIOS `int 0x13` (1 sector/call,
+  reset+retry) loads 64 sectors (stage 2) to `0x7E00`, then jumps there.
+- `kernel_entry.asm` — real→protected trampoline + flat GDT, linked at `0x7E00`.
+  Calls `boot_main()`.
+- `bootmenu.c` — BleeOS Boot Manager (own thing, GRUB/systemd-boot-style):
+  entries, 5 s timeout, Up/Down or j/k, 1-4, Enter, `E` edits the kernel
+  command line per entry. Passes `boot_info_t` (magic, entry, cmdline,
+  boot time) to the kernel. Shell `exit` returns to the menu.
+- `drivers.h/.c` — VGA text, PS/2 keyboard (incl. arrows), PIT sleep,
+  CMOS RTC, reboot/halt. Shared by menu and kernel.
+- `kernel.c` — banner, `verbose` cmdline parsing, runs the shell.
+- `shell.c/.h` — POSIX-style shell: ramfs (`/motd`, `/version`, `/etc/hostname`),
+  env vars, history (Up/Down), line editing, quoting, `$VAR $? $$`,
+  `; && ||` lists, `> >> <` redirection, exit statuses, Ctrl+C/D.
+- `linker.ld` — links stage 2 at `0x7E00`.
 
 ## Shell commands
 
-- `help` — list commands
-- `echo <text>` — print text
-- `clear` — clear screen
-- `info` / `ver` — system info
-- `reboot` — reboot (8042 controller + PCI reset + triple-fault fallback)
-- `halt` — halt CPU
+`help man echo printf clear uname whoami hostname ver pwd ls cd mkdir touch rm cat env export unset sleep uptime date history true false test exit reboot halt poweroff`
+
+`exit` (or Ctrl+D on an empty line) drops back to the boot manager.
 
 ## Build & run
 
@@ -30,5 +36,3 @@ Requires `nasm`, 32-bit-capable `gcc`, `binutils`, `qemu-system-i386`.
 make
 make run
 ```
-
-Type `help` at the `bleeos>` prompt.

@@ -4,9 +4,14 @@ LD=ld
 OBJCOPY=objcopy
 QEMU=qemu-system-i386
 
-CFLAGS=-m32 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
+# MBR loads this many sectors (must cover the whole stage2 binary)
+STAGE2_SECTORS=96
+
+CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
+
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o
 
 all: os.img
 
@@ -16,18 +21,32 @@ boot.bin: boot.asm
 kernel_entry.o: kernel_entry.asm
 	$(AS) -f elf32 kernel_entry.asm -o kernel_entry.o
 
-kernel.o: kernel.c
+drivers.o: drivers.c drivers.h
+	$(CC) $(CFLAGS) -c drivers.c -o drivers.o
+
+bootmenu.o: bootmenu.c drivers.h boot.h
+	$(CC) $(CFLAGS) -c bootmenu.c -o bootmenu.o
+
+shell.o: shell.c shell.h drivers.h
+	$(CC) $(CFLAGS) -c shell.c -o shell.o
+
+kernel.o: kernel.c drivers.h boot.h shell.h
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
 
-kernel.elf: kernel_entry.o kernel.o linker.ld
-	$(LD) -m elf_i386 -T linker.ld -o kernel.elf kernel_entry.o kernel.o
+kernel.elf: $(OBJS) linker.ld
+	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)
 
+# stage2 = flat menu+kernel image, padded to whole sectors
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary kernel.elf kernel.bin
 	@size=$$(stat -c%s kernel.bin); \
+	max=$$(( $(STAGE2_SECTORS) * 512 )); \
+	if [ $$size -gt $$max ]; then \
+		echo "ERROR: stage2 $$size bytes > $$max (grow STAGE2_SECTORS)"; exit 1; \
+	fi; \
 	padded=$$(( (size + 511) / 512 * 512 )); \
 	truncate -s $$padded kernel.bin; \
-	echo "kernel.bin: $$size -> $$padded bytes ($$(($$padded / 512)) sectors)"
+	echo "stage2: $$size -> $$padded bytes ($$(($$padded / 512))/$(STAGE2_SECTORS) sectors)"
 
 os.img: boot.bin kernel.bin
 	cat boot.bin kernel.bin > os.img
@@ -35,12 +54,15 @@ os.img: boot.bin kernel.bin
 	@echo "Built os.img ($$(stat -c%s os.img) bytes)"
 
 run: os.img
-	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot a
+	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+
+run-hd: os.img
+	$(QEMU) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 run-nographic: os.img
-	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot a -nographic
+	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
 
 clean:
-	rm -f boot.bin kernel_entry.o kernel.o kernel.elf kernel.bin os.img
+	rm -f boot.bin $(OBJS) kernel.elf kernel.bin os.img
 
 .PHONY: all run run-nographic clean

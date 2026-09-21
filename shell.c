@@ -1,0 +1,1061 @@
+/* BleeOS shell: POSIX-style builtins, in-memory fs, env vars, history,
+ * quoting, $VAR/$?/$$ expansion, ; && || lists, > >> < redirection.
+ * Freestanding: no libc. Output goes through sh_putc so `>` can capture. */
+#include "drivers.h"
+#include "shell.h"
+
+/* ================= string helpers ================= */
+static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
+static int scmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(u8)*a - (int)(u8)*b;
+}
+static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
+static void smemset(void *p, int v, u32 n) {
+    u8 *b = (u8*)p;
+    for (u32 i = 0; i < n; i++) b[i] = (u8)v;
+}
+static int sazi(const char *s) {   /* atoi, stops at first non-digit */
+    int neg = 0, v = 0;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+static char *sitoa(int v, char *buf) {  /* handles negative */
+    char tmp[12];
+    int i = 0, neg = 0;
+    unsigned u;
+    if (v < 0) { neg = 1; u = (unsigned)(-(v + 1)) + 1u; }
+    else u = (unsigned)v;
+    if (u == 0) tmp[i++] = '0';
+    while (u) { tmp[i++] = (char)('0' + u % 10); u /= 10; }
+    int k = 0;
+    if (neg) buf[k++] = '-';
+    while (i) buf[k++] = tmp[--i];
+    buf[k] = 0;
+    return buf;
+}
+static char *sutoa(unsigned v, char *buf, int base, int upper) {
+    char tmp[12];
+    int i = 0;
+    if (v == 0) tmp[i++] = '0';
+    while (v) {
+        int d = (int)(v % (unsigned)base);
+        tmp[i++] = (char)(d < 10 ? '0' + d : (upper ? 'A' : 'a') + d - 10);
+        v /= (unsigned)base;
+    }
+    int k = 0;
+    while (i) buf[k++] = tmp[--i];
+    buf[k] = 0;
+    return buf;
+}
+
+/* ================= captured output ================= */
+static int cap_active;
+static char cap_buf[2048];
+static u32 cap_len;
+
+static void sh_putc(char c) {
+    if (cap_active) {
+        if (cap_len + 1 < sizeof(cap_buf)) cap_buf[cap_len++] = c;
+    } else {
+        vga_putc(c);
+    }
+}
+static void sh_print(const char *s) { while (*s) sh_putc(*s++); }
+static void sh_eprint(const char *s) { vga_print(s); }  /* errors always on screen */
+
+/* ================= env ================= */
+#define ENV_MAX 32
+typedef struct { u8 used; char name[32]; char val[128]; } env_t;
+static env_t envs[ENV_MAX];
+static int last_status;
+
+static const char *env_get(const char *name) {
+    for (int i = 0; i < ENV_MAX; i++)
+        if (envs[i].used && scmp(envs[i].name, name) == 0) return envs[i].val;
+    return 0;
+}
+static int env_valid_name(const char *n) {
+    if (!*n || (*n != '_' && (*n < 'A' || *n > 'Z') && (*n < 'a' || *n > 'z'))) return 0;
+    for (n++; *n; n++)
+        if (*n != '_' && (*n < '0' || *n > '9') && (*n < 'A' || *n > 'Z') && (*n < 'a' || *n > 'z'))
+            return 0;
+    return 1;
+}
+static int env_set(const char *name, const char *val) {
+    int slot = -1;
+    for (int i = 0; i < ENV_MAX; i++)
+        if (envs[i].used && scmp(envs[i].name, name) == 0) { slot = i; break; }
+    if (slot < 0)
+        for (int i = 0; i < ENV_MAX; i++)
+            if (!envs[i].used) {
+                slot = i;
+                envs[i].used = 1;
+                scpy(envs[i].name, name);
+                break;
+            }
+    if (slot < 0) return -1;
+    u32 k = 0;
+    while (val[k] && k < 127) { envs[slot].val[k] = val[k]; k++; }
+    envs[slot].val[k] = 0;
+    return 0;
+}
+static int env_unset(const char *name) {
+    for (int i = 0; i < ENV_MAX; i++)
+        if (envs[i].used && scmp(envs[i].name, name) == 0) {
+            envs[i].used = 0;
+            return 0;
+        }
+    return -1;
+}
+
+/* ================= ramfs ================= */
+#define FS_MAX 96
+#define FS_DATA 768
+typedef struct { u8 used, is_dir; char name[24]; u8 parent; u16 size; char data[FS_DATA]; } fsnode_t;
+static fsnode_t fs[FS_MAX];
+static char cwd[64];
+
+static int fs_child(u8 parent, const char *name) {
+    for (int i = 0; i < FS_MAX; i++)
+        if (fs[i].used && fs[i].parent == parent && scmp(fs[i].name, name) == 0)
+            return i;
+    return -1;
+}
+
+/* canonicalize path into out (absolute, no . or ..); returns 0 ok */
+static int fs_canon(const char *path, char *out) {
+    char tmp[128];
+    u32 k = 0;
+    if (path[0] != '/') {
+        const char *c = cwd;
+        while (*c && k < 100) tmp[k++] = *c++;
+        if (k == 0 || tmp[k-1] != '/') tmp[k++] = '/';
+    }
+    while (*path && k < 120) tmp[k++] = *path++;
+    tmp[k] = 0;
+    /* split into stack of components */
+    char stack[16][24];
+    int depth = 0, i = 0;
+    while (tmp[i]) {
+        if (depth >= 16) return -1;
+        while (tmp[i] == '/') i++;
+        if (!tmp[i]) break;
+        int j = 0;
+        while (tmp[i] && tmp[i] != '/' && j < 23) { stack[depth][j++] = tmp[i++]; }
+        while (tmp[i] && tmp[i] != '/') i++;
+        stack[depth][j] = 0;
+        if (scmp(stack[depth], ".") == 0) continue;
+        if (scmp(stack[depth], "..") == 0) { if (depth > 0) depth--; continue; }
+        depth++;
+    }
+    u32 o = 0;
+    out[o++] = '/';
+    for (int d = 0; d < depth; d++) {
+        const char *s = stack[d];
+        while (*s && o < 62) out[o++] = *s++;
+        if (d + 1 < depth && o < 62) out[o++] = '/';
+    }
+    out[o] = 0;
+    return 0;
+}
+
+static int fs_resolve(const char *path) {
+    char abs[64];
+    if (fs_canon(path, abs) != 0) return -1;
+    if (abs[1] == 0) return 0;
+    int idx = 0, i = 1;
+    char comp[24];
+    while (abs[i]) {
+        int j = 0;
+        while (abs[i] && abs[i] != '/' && j < 23) comp[j++] = abs[i++];
+        comp[j] = 0;
+        if (abs[i] == '/') i++;
+        if (!fs[idx].is_dir) return -1;
+        idx = fs_child((u8)idx, comp);
+        if (idx < 0) return -1;
+    }
+    return idx;
+}
+
+static int fs_alloc(u8 parent, const char *name, int is_dir) {
+    for (int i = 0; i < FS_MAX; i++)
+        if (!fs[i].used) {
+            fs[i].used = 1;
+            fs[i].is_dir = (u8)is_dir;
+            fs[i].parent = parent;
+            fs[i].size = 0;
+            u32 k = 0;
+            while (name[k] && k < 23) { fs[i].name[k] = name[k]; k++; }
+            fs[i].name[k] = 0;
+            return i;
+        }
+    return -1;
+}
+
+/* split path into parent index + leaf name */
+static int fs_split(const char *path, int *parent, char *leaf) {
+    char abs[64];
+    if (fs_canon(path, abs) != 0) return -1;
+    if (abs[1] == 0) return -1;             /* no leaf for / */
+    int end = (int)slen(abs);
+    int slash = end;
+    while (slash > 0 && abs[slash - 1] != '/') slash--;
+    u32 k = 0;
+    for (int i = slash; abs[i] && k < 23; i++) leaf[k++] = abs[i];
+    leaf[k] = 0;
+    char dir[64];
+    if (slash == 1) { dir[0] = '/'; dir[1] = 0; }
+    else { for (int i = 0; i < slash - 1; i++) dir[i] = abs[i]; dir[slash - 1] = 0; }
+    *parent = fs_resolve(dir);
+    if (*parent < 0 || !fs[*parent].is_dir) return -1;
+    return 0;
+}
+
+static void fs_write_str(const char *path, const char *s) {
+    int idx = fs_resolve(path);
+    if (idx < 0) {
+        int p; char leaf[24];
+        if (fs_split(path, &p, leaf) != 0) return;
+        idx = fs_alloc((u8)p, leaf, 0);
+        if (idx < 0) return;
+    }
+    if (fs[idx].is_dir) return;
+    u32 k = 0;
+    while (s[k] && k < FS_DATA) { fs[idx].data[k] = s[k]; k++; }
+    fs[idx].size = (u16)k;
+}
+
+/* returns 0 ok, -1 missing/not-file, -2 too big, -3 is dir */
+static int fs_write(const char *path, const char *data, u32 len, int append) {
+    int idx = fs_resolve(path);
+    if (idx >= 0 && fs[idx].is_dir) return -3;
+    if (idx < 0) {
+        int p; char leaf[24];
+        if (fs_split(path, &p, leaf) != 0) return -1;
+        idx = fs_alloc((u8)p, leaf, 0);
+        if (idx < 0) return -1;
+    }
+    u32 start = append ? fs[idx].size : 0;
+    if (start + len > FS_DATA) return -2;
+    for (u32 i = 0; i < len; i++) fs[idx].data[start + i] = data[i];
+    fs[idx].size = (u16)(start + len);
+    return 0;
+}
+
+static void fs_init(void) {
+    smemset(fs, 0, sizeof(fs));
+    fs[0].used = 1; fs[0].is_dir = 1;
+    scpy(fs[0].name, "/");
+    int etc = fs_alloc(0, "etc", 1);
+    fs_write_str("/motd", "Welcome to BleeOS 0.3 - tiny POSIX-ish shell.\nType `help`.\n");
+    fs_write_str("/version", "BleeOS 0.3.0 (i386 protected mode)\n");
+    if (etc >= 0) fs_write_str("/etc/hostname", "bleeos");
+    scpy(cwd, "/");
+}
+
+static const char *my_hostname(void) {
+    int idx = fs_resolve("/etc/hostname");
+    if (idx >= 0 && !fs[idx].is_dir && fs[idx].size) {
+        static char h[32];
+        u32 k = 0;
+        while (k < fs[idx].size && k < 31 && fs[idx].data[k] != '\n') {
+            h[k] = fs[idx].data[k]; k++;
+        }
+        h[k] = 0;
+        return h[0] ? h : "bleeos";
+    }
+    return "bleeos";
+}
+
+/* ================= parser ================= */
+/* segment ops */
+enum { OP_FIRST, OP_SEQ, OP_AND, OP_OR };
+#define MAXSEG 16
+typedef struct { char *text; int op; } seg_t;
+
+static int split_list(char *line, seg_t *segs) {
+    int n = 0, pending = OP_FIRST;
+    char *start = line;
+    int sq = 0, dq = 0;
+    for (char *p = line; ; p++) {
+        char c = *p;
+        if (c == '\\' && !sq && p[1]) { p++; continue; }
+        if (c == '\'' && !dq) sq = !sq;
+        else if (c == '"' && !sq) dq = !dq;
+        if (!sq && !dq && (c == ';' || c == '&' || c == '|' || c == 0)) {
+            if (c == '&' && p[1] == '&') {
+                *p = 0;
+                if (n >= MAXSEG) return -1;
+                segs[n].text = start; segs[n].op = pending; n++;
+                pending = OP_AND; p++; start = p + 1;
+            } else if (c == '|' && p[1] == '|') {
+                *p = 0;
+                if (n >= MAXSEG) return -1;
+                segs[n].text = start; segs[n].op = pending; n++;
+                pending = OP_OR; p++; start = p + 1;
+            } else if (c == ';' || c == 0) {
+                if (c == ';') *p = 0;
+                if (n >= MAXSEG) return -1;
+                segs[n].text = start; segs[n].op = pending; n++;
+                pending = OP_SEQ; start = p + 1;
+                if (c == 0) break;
+            } else {
+                return -2;  /* single & or |: no job control / pipes */
+            }
+        }
+        if (c == 0) break;
+    }
+    return n;
+}
+
+static char tokpool[4096];
+static char *g_argv[32];
+static char redir_in[96], redir_out[96];
+static int redir_append;
+
+static int expand_var(const char *p, char *dst, int *dl, int cap) {
+    /* p points just after '$'; returns chars consumed from p */
+    char num[12];
+    if (*p == '?') { sitoa(last_status, num); }
+    else if (*p == '$') { num[0] = '1'; num[1] = 0; }
+    else if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || *p == '_') {
+        char name[32];
+        int i = 0;
+        while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+               (*p >= '0' && *p <= '9') || *p == '_') {
+            if (i < 31) name[i++] = *p;
+            p++;
+        }
+        name[i] = 0;
+        const char *v = env_get(name);
+        if (!v) v = "";
+        for (const char *q = v; *q && *dl < cap; q++) dst[(*dl)++] = *q;
+        return (int)(p - (p - i)); /* consumed = i */
+    } else {
+        if (*dl < cap) dst[(*dl)++] = '$';
+        return 0;
+    }
+    if (*p == '?' || *p == '$') {
+        for (const char *q = num; *q && *dl < cap; q++) dst[(*dl)++] = *q;
+        return 1;
+    }
+    return 0;
+}
+
+/* parse one word (with quotes/escapes/expansion); *pp advanced past it */
+static int parse_word(char **pp, char *dst, int cap) {
+    int dl = 0, sq = 0, dq = 0;
+    char *p = *pp;
+    for (;; p++) {
+        char c = *p;
+        if (!sq && !dq && (c == 0 || c == ' ' || c == '\t' || c == '>' || c == '<'))
+            break;
+        if (!dq && c == '\'') { sq = !sq; continue; }
+        if (!sq && c == '"') { dq = !dq; continue; }
+        if (!sq && c == '\\' && p[1]) { p++; if (dl < cap) dst[dl++] = *p; continue; }
+        if (!sq && c == '$') {
+            int used = expand_var(p + 1, dst, &dl, cap);
+            p += used;
+            continue;
+        }
+        if (dl < cap) dst[dl++] = c;
+    }
+    *pp = p;
+    if (dl >= cap) return -1;
+    dst[dl] = 0;
+    return dl;   /* may be 0 for quoted empty string: still a word */
+}
+
+static int tokenize(char *seg) {
+    int argc = 0, pool = 0;
+    redir_in[0] = 0; redir_out[0] = 0; redir_append = 0;
+    char *p = seg;
+    while (*p == ' ' || *p == '\t') p++;
+    while (*p) {
+        if (*p == '>') {
+            int app = 0;
+            if (p[1] == '>') { app = 1; p++; }
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) return -1;
+            char tmp[96];
+            int w = parse_word(&p, tmp, 95);
+            if (w < 0 || tmp[0] == 0) return -1;
+            scpy(redir_out, tmp);
+            redir_append = app;
+        } else if (*p == '<') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) return -1;
+            char tmp[96];
+            int w = parse_word(&p, tmp, 95);
+            if (w < 0 || tmp[0] == 0) return -1;
+            scpy(redir_in, tmp);
+        } else {
+            if (argc >= 31) return -1;
+            int left = (int)sizeof(tokpool) - pool;
+            int w = parse_word(&p, tokpool + pool, left - 1);
+            if (w < 0) return -1;
+            g_argv[argc++] = tokpool + pool;
+            pool += w + 1;
+        }
+        while (*p == ' ' || *p == '\t') p++;
+    }
+    g_argv[argc] = 0;
+    return argc;
+}
+
+/* ================= builtins ================= */
+typedef int (*builtin_fn)(int argc, char **argv, const char *in);
+static int exit_flag, exit_code;
+
+static int b_help(int argc, char **argv, const char *in);
+static int b_man(int argc, char **argv, const char *in);
+static int b_echo(int argc, char **argv, const char *in) {
+    (void)in;
+    int i = 1, nl = 1;
+    if (argc > 1 && scmp(argv[1], "-n") == 0) { nl = 0; i = 2; }
+    for (; i < argc; i++) {
+        if (i > 1 + !nl) sh_putc(' ');
+        sh_print(argv[i]);
+    }
+    if (nl) sh_putc('\n');
+    return 0;
+}
+static int b_printf(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc < 2) { sh_eprint("printf: usage: printf FORMAT [ARGS...]\n"); return 2; }
+    const char *f = argv[1];
+    int ai = 2;
+    char num[16];
+    for (; *f; f++) {
+        if (*f == '\\' && f[1]) {
+            f++;
+            sh_putc(*f == 'n' ? '\n' : *f == 't' ? '\t' : *f == 'e' ? 27 : *f);
+            continue;
+        }
+        if (*f != '%') { sh_putc(*f); continue; }
+        f++;
+        const char *a = ai < argc ? argv[ai++] : 0;
+        switch (*f) {
+            case 's': sh_print(a ? a : ""); break;
+            case 'd': case 'i': sh_print(sitoa(a ? sazi(a) : 0, num)); break;
+            case 'u': sh_print(sutoa(a ? (unsigned)sazi(a) : 0, num, 10, 0)); break;
+            case 'x': sh_print(sutoa(a ? (unsigned)sazi(a) : 0, num, 16, 0)); break;
+            case 'c': sh_putc(a ? a[0] : 0); break;
+            case '%': sh_putc('%'); break;
+            case 0: f--; break;
+            default: sh_putc('%'); sh_putc(*f); break;
+        }
+    }
+    return 0;
+}
+static int b_clear(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    vga_clear();
+    return 0;
+}
+static int b_uname(int argc, char **argv, const char *in) {
+    (void)in;
+    int s = 0, n = 0, r = 0, v = 0, m = 0, all = 0;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '-') { sh_eprint("uname: extra operand\n"); return 1; }
+        for (const char *o = argv[i] + 1; *o; o++) {
+            if (*o == 's') s = 1; else if (*o == 'n') n = 1;
+            else if (*o == 'r') r = 1; else if (*o == 'v') v = 1;
+            else if (*o == 'm' || *o == 'p') m = 1;
+            else if (*o == 'a') all = 1;
+            else if (*o == 'o') s = s;
+            else { sh_eprint("uname: invalid option\n"); return 1; }
+        }
+    }
+    if (!s && !n && !r && !v && !m && !all) s = 1;
+    if (all) { s = n = r = v = m = 1; }
+    int first = 1;
+#define UFIELD(x) do { if (!first) sh_putc(' '); sh_print(x); first = 0; } while (0)
+    if (s) UFIELD("BleeOS");
+    if (n) UFIELD(my_hostname());
+    if (r) UFIELD("0.3.0");
+    if (v) UFIELD("#1 BleeOS");
+    if (m) UFIELD("i386");
+    sh_putc('\n');
+    return 0;
+}
+static int b_whoami(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print("root\n");
+    return 0;
+}
+static int b_hostname(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc == 1) { sh_print(my_hostname()); sh_putc('\n'); return 0; }
+    if (argc > 2) { sh_eprint("hostname: too many arguments\n"); return 1; }
+    if (slen(argv[1]) > 31 || slen(argv[1]) == 0) {
+        sh_eprint("hostname: invalid name\n"); return 1;
+    }
+    fs_write_str("/etc/hostname", argv[1]);
+    return 0;
+}
+static int b_ver(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print("BleeOS 0.3.0 (i386 protected mode)\n");
+    return 0;
+}
+static int b_pwd(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print(cwd); sh_putc('\n');
+    return 0;
+}
+static int b_ls(int argc, char **argv, const char *in) {
+    (void)in;
+    int l = 0, first = 1, multi = 0, npaths = 0;
+    for (int i = 1; i < argc; i++)
+        if (argv[i][0] != '-') npaths++;
+    multi = npaths > 1;
+    for (int i = 1; i < argc || (i == 1 && argc == 1); i++) {
+        const char *path = (i < argc) ? argv[i] : ".";
+        if (i < argc && argv[i][0] == '-') {
+            for (const char *o = argv[i] + 1; *o; o++)
+                if (*o == 'l') l = 1;
+                else { sh_eprint("ls: invalid option\n"); return 1; }
+            continue;
+        }
+        int idx = fs_resolve(path);
+        if (idx < 0) { sh_eprint("ls: "); sh_eprint(path); sh_eprint(": No such file or directory\n"); return 1; }
+        if (multi) { if (!first) sh_putc('\n'); sh_print(path); sh_print(":\n"); }
+        first = 0;
+        if (!fs[idx].is_dir) {
+            if (l) { sh_print("- "); sh_print(fs[idx].name); sh_putc(' '); }
+            else sh_print(fs[idx].name);
+            sh_putc('\n');
+            continue;
+        }
+        for (int j = 0; j < FS_MAX; j++) {
+            if (!fs[j].used || fs[j].parent != idx || j == idx) continue;
+            if (l) {
+                char num[12];
+                sh_print(fs[j].is_dir ? "d " : "- ");
+                sh_print(fs[j].name);
+                if (fs[j].is_dir) sh_putc('/');
+                else { sh_putc(' '); sh_print(sutoa(fs[j].size, num, 10, 0)); }
+                sh_putc('\n');
+            } else {
+                sh_print(fs[j].name);
+                if (fs[j].is_dir) sh_putc('/');
+                sh_putc('\n');
+            }
+        }
+        if (i >= argc) break;
+    }
+    return 0;
+}
+static int b_cd(int argc, char **argv, const char *in) {
+    (void)in;
+    const char *path = argc > 1 ? argv[1] : "/";
+    if (argc > 2) { sh_eprint("cd: too many arguments\n"); return 1; }
+    char abs[64];
+    if (fs_canon(path, abs) != 0) { sh_eprint("cd: invalid path\n"); return 1; }
+    int idx = fs_resolve(abs);
+    if (idx < 0) { sh_eprint("cd: "); sh_eprint(path); sh_eprint(": No such file or directory\n"); return 1; }
+    if (!fs[idx].is_dir) { sh_eprint("cd: "); sh_eprint(path); sh_eprint(": Not a directory\n"); return 1; }
+    scpy(cwd, abs);
+    return 0;
+}
+static int b_mkdir(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc < 2) { sh_eprint("mkdir: missing operand\n"); return 1; }
+    int rc = 0;
+    for (int i = 1; i < argc; i++) {
+        int p; char leaf[24];
+        if (fs_split(argv[i], &p, leaf) != 0) {
+            sh_eprint("mkdir: "); sh_eprint(argv[i]); sh_eprint(": bad path\n"); rc = 1; continue;
+        }
+        if (fs_child((u8)p, leaf) >= 0) {
+            sh_eprint("mkdir: "); sh_eprint(argv[i]); sh_eprint(": exists\n"); rc = 1; continue;
+        }
+        if (fs_alloc((u8)p, leaf, 1) < 0) { sh_eprint("mkdir: no space\n"); rc = 1; }
+    }
+    return rc;
+}
+static int b_touch(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc < 2) { sh_eprint("touch: missing operand\n"); return 1; }
+    int rc = 0;
+    for (int i = 1; i < argc; i++) {
+        int idx = fs_resolve(argv[i]);
+        if (idx >= 0) {
+            if (fs[idx].is_dir) { sh_eprint("touch: "); sh_eprint(argv[i]); sh_eprint(": Is a directory\n"); rc = 1; }
+            continue;
+        }
+        int p; char leaf[24];
+        if (fs_split(argv[i], &p, leaf) != 0 || fs_alloc((u8)p, leaf, 0) < 0) {
+            sh_eprint("touch: "); sh_eprint(argv[i]); sh_eprint(": bad path\n"); rc = 1;
+        }
+    }
+    return rc;
+}
+static int rm_one(int idx) {
+    if (fs[idx].is_dir)
+        for (int j = 0; j < FS_MAX; j++)
+            if (fs[j].used && fs[j].parent == idx && j != idx) {
+                if (fs[j].is_dir) { if (rm_one(j) != 0) return -1; }
+                else fs[j].used = 0;
+            }
+    fs[idx].used = 0;
+    return 0;
+}
+static int b_rm(int argc, char **argv, const char *in) {
+    (void)in;
+    int rec = 0, i = 1, rc = 0;
+    if (argc > 1 && scmp(argv[1], "-r") == 0) { rec = 1; i = 2; }
+    if (i >= argc) { sh_eprint("rm: missing operand\n"); return 1; }
+    for (; i < argc; i++) {
+        int idx = fs_resolve(argv[i]);
+        if (idx < 0) { sh_eprint("rm: "); sh_eprint(argv[i]); sh_eprint(": No such file or directory\n"); rc = 1; continue; }
+        if (idx == 0) { sh_eprint("rm: cannot remove /\n"); rc = 1; continue; }
+        if (fs[idx].is_dir && !rec) {
+            int empty = 1;
+            for (int j = 0; j < FS_MAX; j++)
+                if (fs[j].used && fs[j].parent == idx && j != idx) empty = 0;
+            if (!empty) { sh_eprint("rm: "); sh_eprint(argv[i]); sh_eprint(": is a directory (use -r)\n"); rc = 1; continue; }
+        }
+        rm_one(idx);
+    }
+    return rc;
+}
+static int b_cat(int argc, char **argv, const char *in) {
+    int rc = 0, did = 0;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] == 0) continue;  /* stdin marker */
+        int idx = fs_resolve(argv[i]);
+        if (idx < 0 || fs[idx].is_dir) {
+            sh_eprint("cat: "); sh_eprint(argv[i]); sh_eprint(": No such file\n"); rc = 1; continue;
+        }
+        for (u32 k = 0; k < fs[idx].size; k++) sh_putc(fs[idx].data[k]);
+        did = 1;
+    }
+    if (argc == 1) {
+        if (in) { sh_print(in); did = 1; }
+        else {
+            /* interactive: until Ctrl+D on empty line */
+            static char lbuf[256];
+            for (;;) {
+                extern int shell_readline(char *buf);
+                int n = shell_readline(lbuf);
+                if (n < 0) break;
+                for (int k = 0; k < n; k++) sh_putc(lbuf[k]);
+                sh_putc('\n');
+                did = 1;
+            }
+        }
+    }
+    (void)did;
+    return rc;
+}
+static int b_env(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    for (int i = 0; i < ENV_MAX; i++)
+        if (envs[i].used) { sh_print(envs[i].name); sh_putc('='); sh_print(envs[i].val); sh_putc('\n'); }
+    return 0;
+}
+static int b_export(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc == 1) {
+        for (int i = 0; i < ENV_MAX; i++)
+            if (envs[i].used) {
+                sh_print("export "); sh_print(envs[i].name);
+                sh_print("=\""); sh_print(envs[i].val); sh_print("\"\n");
+            }
+        return 0;
+    }
+    int rc = 0;
+    for (int i = 1; i < argc; i++) {
+        char *eq = argv[i];
+        while (*eq && *eq != '=') eq++;
+        char name[32];
+        u32 k = 0;
+        for (const char *q = argv[i]; q < eq && k < 31; q++) name[k++] = *q;
+        name[k] = 0;
+        if (!env_valid_name(name)) { sh_eprint("export: invalid name\n"); rc = 1; continue; }
+        const char *val = *eq ? eq + 1 : (env_get(name) ? env_get(name) : "");
+        if (env_set(name, val) != 0) { sh_eprint("export: no space\n"); rc = 1; }
+    }
+    return rc;
+}
+static int b_unset(int argc, char **argv, const char *in) {
+    (void)in;
+    for (int i = 1; i < argc; i++) env_unset(argv[i]);
+    return 0;
+}
+static int b_sleep(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc != 2) { sh_eprint("sleep: usage: sleep SECONDS\n"); return 1; }
+    for (const char *q = argv[1]; *q; q++)
+        if (*q < '0' || *q > '9') { sh_eprint("sleep: invalid number\n"); return 1; }
+    int s = sazi(argv[1]);
+    for (int i = 0; i < s; i++) sleep_ms(1000);
+    return 0;
+}
+static u32 g_boot_sec;
+static int b_uptime(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    u32 now = rtc_seconds();
+    u32 up = now >= g_boot_sec ? now - g_boot_sec : 0;
+    char num[12];
+    sh_print("up ");
+    if (up >= 3600) { sh_print(sutoa(up / 3600, num, 10, 0)); sh_print(up / 3600 == 1 ? " hour, " : " hours, "); up %= 3600; }
+    if (up >= 60) { sh_print(sutoa(up / 60, num, 10, 0)); sh_print(up / 60 == 1 ? " min" : " mins"); }
+    else { sh_print(sutoa(up, num, 10, 0)); sh_print(up == 1 ? " sec" : " secs"); }
+    sh_putc('\n');
+    return 0;
+}
+static int b_date(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc > 1 && scmp(argv[1], "-u") != 0) { sh_eprint("date: usage: date [-u]\n"); return 1; }
+    char out[20];
+    rtc_format(out);
+    sh_print(out); sh_print(" UTC\n");
+    return 0;
+}
+#define HIST_N 32
+static char hist[HIST_N][256];
+static int hcount;
+static void hist_add(const char *line) {
+    if (!line[0]) return;
+    if (hcount > 0 && scmp(hist[(hcount - 1) % HIST_N], line) == 0) return;
+    scpy(hist[hcount % HIST_N], line);
+    hcount++;
+}
+static int b_history(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc > 1 && scmp(argv[1], "-c") == 0) { hcount = 0; return 0; }
+    int start = 0;
+    if (hcount > HIST_N) start = hcount - HIST_N;
+    char num[12];
+    for (int i = start; i < hcount; i++) {
+        sh_print("  "); sh_print(sutoa((unsigned)(i + 1), num, 10, 0));
+        sh_print("  "); sh_print(hist[i % HIST_N]); sh_putc('\n');
+    }
+    return 0;
+}
+static int b_true(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in; return 0;
+}
+static int b_false(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in; return 1;
+}
+static int b_test(int argc, char **argv, const char *in) {
+    (void)in;
+    /* test [!] EXPR (no parens) */
+    int i = 1, neg = 0;
+    if (i < argc && scmp(argv[i], "!") == 0) { neg = 1; i++; }
+    int left = argc - i, r = 0;
+    if (left == 0) r = 1;
+    else if (left == 1) r = argv[i][0] == 0;
+    else if (left == 2) {
+        if (scmp(argv[i], "-z") == 0) r = argv[i+1][0] != 0;
+        else if (scmp(argv[i], "-n") == 0) r = argv[i+1][0] == 0;
+        else if (scmp(argv[i], "-e") == 0) r = fs_resolve(argv[i+1]) < 0;
+        else if (scmp(argv[i], "-f") == 0) {
+            int x = fs_resolve(argv[i+1]); r = x < 0 || fs[x].is_dir;
+        } else if (scmp(argv[i], "-d") == 0) {
+            int x = fs_resolve(argv[i+1]); r = x < 0 || !fs[x].is_dir;
+        } else { sh_eprint("test: unknown unary\n"); return 2; }
+    } else if (left == 3) {
+        if (scmp(argv[i+1], "=") == 0) r = scmp(argv[i], argv[i+2]) != 0;
+        else if (scmp(argv[i+1], "!=") == 0) r = scmp(argv[i], argv[i+2]) == 0;
+        else {
+            int a = sazi(argv[i]), b = sazi(argv[i+2]);
+            if (scmp(argv[i+1], "-eq") == 0) r = a != b;
+            else if (scmp(argv[i+1], "-ne") == 0) r = a == b;
+            else if (scmp(argv[i+1], "-lt") == 0) r = a >= b;
+            else if (scmp(argv[i+1], "-le") == 0) r = a > b;
+            else if (scmp(argv[i+1], "-gt") == 0) r = a <= b;
+            else if (scmp(argv[i+1], "-ge") == 0) r = a < b;
+            else { sh_eprint("test: unknown binary\n"); return 2; }
+        }
+    } else { sh_eprint("test: too many arguments\n"); return 2; }
+    return neg ? !r : r;
+}
+static int b_exit(int argc, char **argv, const char *in) {
+    (void)in;
+    exit_flag = 1;
+    exit_code = argc > 1 ? sazi(argv[1]) : last_status;
+    return exit_code;
+}
+static int b_reboot(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print("Rebooting...\n");
+    reboot();
+    return 0;
+}
+static int b_poweroff(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print("Halted. You can close QEMU.\n");
+    halt_cpu();
+    return 0;
+}
+
+/* man pages */
+static const char MAN_HELP[] =
+    "help - list commands\nUsage: help\nSee also: man <command>.\n";
+static const char MAN_MAN[] =
+    "man - show command manual\nUsage: man [COMMAND...]\nWith no args, lists topics.\n";
+static const char MAN_ECHO[] =
+    "echo - print arguments\nUsage: echo [-n] [TEXT...]\nExpands $VAR. Use > FILE to write to a file.\n";
+static const char MAN_PRINTF[] =
+    "printf - formatted print\nUsage: printf FORMAT [ARGS...]\nSupports %s %d %i %u %x %c %%, and \\n \\t \\\\ in FORMAT.\n";
+static const char MAN_CLEAR[] = "clear - clear the screen\nUsage: clear\n";
+static const char MAN_UNAME[] =
+    "uname - system info\nUsage: uname [-asnrvm]\n  -s name  -n host  -r release  -v version  -m machine  -a all\n";
+static const char MAN_WHOAMI[] = "whoami - print user\nUsage: whoami\n";
+static const char MAN_HOSTNAME[] =
+    "hostname - show/set host name\nUsage: hostname [NAME]\nStored in /etc/hostname.\n";
+static const char MAN_PWD[] = "pwd - print working directory\nUsage: pwd\n";
+static const char MAN_LS[] = "ls - list files\nUsage: ls [-l] [PATH...]\n";
+static const char MAN_CD[] = "cd - change directory\nUsage: cd [DIR]\n";
+static const char MAN_MKDIR[] = "mkdir - create directories\nUsage: mkdir DIR...\n";
+static const char MAN_TOUCH[] = "touch - create empty files\nUsage: touch FILE...\n";
+static const char MAN_RM[] = "rm - remove files/dirs\nUsage: rm [-r] PATH...\n";
+static const char MAN_CAT[] =
+    "cat - print files\nUsage: cat [FILE...]\nWith no FILE reads stdin (< FILE or keyboard, end with Ctrl+D).\n";
+static const char MAN_ENV[] = "env - list environment\nUsage: env\n";
+static const char MAN_EXPORT[] =
+    "export - set environment vars\nUsage: export [NAME=VALUE...]\nExpansions: $NAME $? $$. Bare `export` lists.\n";
+static const char MAN_UNSET[] = "unset - remove environment vars\nUsage: unset NAME...\n";
+static const char MAN_SLEEP[] = "sleep - wait\nUsage: sleep SECONDS\n";
+static const char MAN_UPTIME[] = "uptime - time since boot\nUsage: uptime\n";
+static const char MAN_DATE[] = "date - real-time clock\nUsage: date [-u]\n";
+static const char MAN_HISTORY[] =
+    "history - command history\nUsage: history [-c]\nUp/Down recalls lines while typing.\n";
+static const char MAN_TRUE[] = "true - exit 0\nUsage: true\n";
+static const char MAN_FALSE[] = "false - exit 1\nUsage: false\n";
+static const char MAN_TEST[] =
+    "test - check conditions\nUsage: test EXPR\n  -z/-n S, S =/!= T, N -eq/-ne/-lt/-le/-gt/-ge M,\n  -e/-f/-d PATH, ! EXPR. Note: quote < > (e.g. \"<\").\n";
+static const char MAN_EXIT[] =
+    "exit - leave the shell (back to boot menu)\nUsage: exit [N]\nCtrl+D on empty line also exits.\n";
+static const char MAN_REBOOT[] = "reboot - reboot the machine\nUsage: reboot\n";
+static const char MAN_HALT[] =
+    "halt/poweroff - halt the CPU\nUsage: halt\n";
+static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
+static const char MAN_SHELL[] =
+    "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
+    "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
+    "Ctrl+C cancels a line, Ctrl+D exits on empty line.\n";
+
+static int b_man(int argc, char **argv, const char *in);
+static int b_help(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    sh_print("Commands: help man echo printf clear uname whoami hostname ver\n"
+             "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
+             "  history true false test exit reboot halt poweroff\n"
+             "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
+    return 0;
+}
+
+typedef struct { const char *name, *one, *man; builtin_fn fn; } cmd_t;
+static const cmd_t cmds[] = {
+    {"help", "list commands", MAN_HELP, b_help},
+    {"man", "show manuals", MAN_MAN, b_man},
+    {"echo", "print text", MAN_ECHO, b_echo},
+    {"printf", "formatted print", MAN_PRINTF, b_printf},
+    {"clear", "clear screen", MAN_CLEAR, b_clear},
+    {"uname", "system info", MAN_UNAME, b_uname},
+    {"whoami", "print user", MAN_WHOAMI, b_whoami},
+    {"hostname", "show/set host", MAN_HOSTNAME, b_hostname},
+    {"ver", "OS version", MAN_VER, b_ver},
+    {"pwd", "working dir", MAN_PWD, b_pwd},
+    {"ls", "list files", MAN_LS, b_ls},
+    {"cd", "change dir", MAN_CD, b_cd},
+    {"mkdir", "make dirs", MAN_MKDIR, b_mkdir},
+    {"touch", "make files", MAN_TOUCH, b_touch},
+    {"rm", "remove files", MAN_RM, b_rm},
+    {"cat", "print files", MAN_CAT, b_cat},
+    {"env", "environment", MAN_ENV, b_env},
+    {"export", "set vars", MAN_EXPORT, b_export},
+    {"unset", "unset vars", MAN_UNSET, b_unset},
+    {"sleep", "wait", MAN_SLEEP, b_sleep},
+    {"uptime", "since boot", MAN_UPTIME, b_uptime},
+    {"date", "clock", MAN_DATE, b_date},
+    {"history", "cmd history", MAN_HISTORY, b_history},
+    {"true", "exit 0", MAN_TRUE, b_true},
+    {"false", "exit 1", MAN_FALSE, b_false},
+    {"test", "conditions", MAN_TEST, b_test},
+    {"exit", "back to menu", MAN_EXIT, b_exit},
+    {"reboot", "reboot", MAN_REBOOT, b_reboot},
+    {"halt", "halt CPU", MAN_HALT, b_poweroff},
+    {"poweroff", "halt CPU", MAN_HALT, b_poweroff},
+    {0, 0, 0, 0},
+};
+
+static int b_man(int argc, char **argv, const char *in) {
+    (void)in;
+    if (argc == 1) {
+        sh_print("Topics: ");
+        for (const cmd_t *c = cmds; c->name; c++) {
+            sh_print(c->name); sh_putc(' ');
+        }
+        sh_print("shell\n");
+        return 0;
+    }
+    int rc = 0;
+    for (int i = 1; i < argc; i++) {
+        if (scmp(argv[i], "shell") == 0) { sh_print(MAN_SHELL); continue; }
+        const cmd_t *found = 0;
+        for (const cmd_t *c = cmds; c->name; c++)
+            if (scmp(c->name, argv[i]) == 0) { found = c; break; }
+        if (!found) { sh_eprint("man: no entry for "); sh_eprint(argv[i]); sh_eprint("\n"); rc = 1; }
+        else sh_print(found->man);
+    }
+    return rc;
+}
+
+static int dispatch(int argc, char **argv, const char *in) {
+    for (const cmd_t *c = cmds; c->name; c++)
+        if (scmp(c->name, argv[0]) == 0) return c->fn(argc, argv, in);
+    sh_eprint(argv[0]);
+    sh_eprint(": command not found\n");
+    return 127;
+}
+
+/* ================= run ================= */
+static int run_segment(char *text) {
+    int argc = tokenize(text);
+    if (argc < 0) { sh_eprint("syntax error\n"); return 2; }
+    if (argc == 0 && !redir_out[0] && !redir_in[0]) return -1;  /* blank: keep $? */
+    const char *in = 0;
+    static char inbuf[768];
+    if (redir_in[0]) {
+        int idx = fs_resolve(redir_in);
+        if (idx < 0 || fs[idx].is_dir) {
+            sh_eprint(redir_in); sh_eprint(": No such file\n");
+            return 1;
+        }
+        u32 k = 0;
+        while (k < fs[idx].size && k < sizeof(inbuf) - 1) { inbuf[k] = fs[idx].data[k]; k++; }
+        inbuf[k] = 0;
+        in = inbuf;
+    }
+    cap_active = redir_out[0] ? 1 : 0;
+    cap_len = 0;
+    int st = argc > 0 ? dispatch(argc, g_argv, in) : 0;
+    cap_active = 0;
+    if (redir_out[0]) {
+        int w = fs_write(redir_out, cap_buf, cap_len, redir_append);
+        if (w == -1) { sh_eprint(redir_out); sh_eprint(": No such file or directory\n"); st = 1; }
+        else if (w == -3) { sh_eprint(redir_out); sh_eprint(": Is a directory\n"); st = 1; }
+        else if (w == -2) { sh_eprint(redir_out); sh_eprint(": File too large\n"); st = 1; }
+    }
+    return st;
+}
+
+static int run_line(char *line) {
+    seg_t segs[MAXSEG];
+    int n = split_list(line, segs);
+    if (n == -2) { sh_eprint("syntax error: pipes (&, |) not supported\n"); last_status = 2; return 2; }
+    if (n < 0) { sh_eprint("syntax error\n"); last_status = 2; return 2; }
+    int any = 0;
+    for (int i = 0; i < n; i++) {
+        int run = 0;
+        if (segs[i].op == OP_FIRST || segs[i].op == OP_SEQ) run = 1;
+        else if (segs[i].op == OP_AND) run = last_status == 0;
+        else if (segs[i].op == OP_OR) run = last_status != 0;
+        if (run) {
+            int st = run_segment(segs[i].text);
+            if (st >= 0) last_status = st;   /* blank segs keep $? */
+        }
+    }
+    (void)any;
+    return last_status;
+}
+
+/* ================= line editor ================= */
+int shell_readline(char *buf) {
+    /* prompt already printed; returns len, -1 EOF (Ctrl+D empty), -2 cancel (Ctrl+C) */
+    u8 sr = vga_row(), sc = vga_col();
+    int len = 0, pos = 0, old = 0, hnav = -1;
+    static char draft[256];
+    buf[0] = 0;
+    for (;;) {
+        int k = kbd_getkey();
+        if (k == '\n') { vga_putc('\n'); buf[len] = 0; return len; }
+        if (k == 3) return -2;                       /* Ctrl+C */
+        if (k == 4) { if (len == 0) return -1; continue; }  /* Ctrl+D */
+        if (k == '\b') {
+            if (pos > 0) {
+                for (int i = pos; i < len; i++) buf[i-1] = buf[i];
+                len--; pos--;
+            }
+        } else if (k == KEY_DEL) {
+            if (pos < len) {
+                for (int i = pos + 1; i < len; i++) buf[i-1] = buf[i];
+                len--;
+            }
+        } else if (k == KEY_LEFT) { if (pos > 0) pos--; }
+        else if (k == KEY_RIGHT) { if (pos < len) pos++; }
+        else if (k == KEY_HOME) pos = 0;
+        else if (k == KEY_END) pos = len;
+        else if (k == KEY_UP || k == KEY_DOWN) {
+            if (hcount == 0) continue;
+            if (hnav == -1) { scpy(draft, buf); draft[len] = 0; }
+            if (k == KEY_UP) { if (hnav < hcount - 1 && hnav < HIST_N - 1) hnav++; }
+            else { hnav--; }
+            if (hnav < 0) { scpy(buf, draft); len = pos = (int)slen(buf); }
+            else {
+                int hi = hcount - 1 - hnav;
+                if (hi < 0) hi = 0;
+                scpy(buf, hist[hi % HIST_N]);
+                len = pos = (int)slen(buf);
+            }
+        } else if (k >= 32 && k < 127) {
+            if (len >= 255) continue;
+            for (int i = len; i > pos; i--) buf[i] = buf[i-1];
+            buf[pos++] = (char)k;
+            len++;
+            hnav = -1;
+        } else continue;
+        buf[len] = 0;
+        /* redraw single line */
+        vga_setcursor(sr, sc);
+        for (int i = 0; i < len; i++) vga_putc(buf[i]);
+        for (int i = len; i < old; i++) vga_putc(' ');
+        old = len;
+        vga_setcursor(sr, (u8)(sc + pos));
+    }
+}
+
+/* ================= main loop ================= */
+void shell_run(u32 boot_sec, int verbose) {
+    (void)verbose;
+    g_boot_sec = boot_sec;
+    fs_init();
+    smemset(envs, 0, sizeof(envs));
+    smemset(hist, 0, sizeof(hist));
+    hcount = 0;
+    last_status = 0;
+    exit_flag = 0; exit_code = 0;
+    env_set("PS1", "$ ");
+    env_set("HOME", "/");
+
+    static char line[256];
+    for (;;) {
+        vga_setcolor(0x0A);
+        vga_print("root@");
+        vga_print(my_hostname());
+        vga_setcolor(0x07);
+        vga_putc(':');
+        vga_setcolor(0x0C);
+        vga_print(cwd);
+        vga_setcolor(0x07);
+        vga_print("$ ");
+        int r = shell_readline(line);
+        if (r == -1) { vga_print("exit\n"); break; }
+        if (r == -2) { vga_print("^C\n"); last_status = 130; continue; }
+        if (!line[0]) continue;
+        hist_add(line);
+        run_line(line);
+        if (exit_flag) break;
+    }
+}

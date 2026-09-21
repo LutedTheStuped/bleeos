@@ -6,7 +6,9 @@
 [BITS 16]
 section .text
 global _start
-extern kernel_main
+extern boot_main
+extern __bss_start
+extern __bss_end
 
 CODE_SEG equ 0x08
 DATA_SEG equ 0x10
@@ -43,8 +45,33 @@ protected_entry:
     mov gs, ax
     mov ss, ax
     mov esp, 0x90000            ; 576KB, below VGA/EBDA region
+    cld                         ; string ops assume DF=0
+    ; --- zero .bss (uninitialized globals expect 0) ---
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    jz .bss_done
+    xor eax, eax
+    shr ecx, 2                  ; word count
+    jz .bss_bytes
+.bss_words:
+    mov [edi], eax
+    add edi, 4
+    dec ecx
+    jnz .bss_words
+.bss_bytes:
+    mov ecx, __bss_end
+    sub ecx, edi
+.bss_tail:
+    test ecx, ecx
+    jz .bss_done
+    mov [edi], al
+    inc edi
+    dec ecx
+    jmp .bss_tail
+.bss_done:
 
-    call kernel_main
+    call boot_main
 
 .hang:
     cli

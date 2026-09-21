@@ -1,0 +1,9 @@
+/* BleeOS POSIX-style shell interface. */
+#ifndef SHELL_H
+#define SHELL_H
+
+#include "drivers.h"
+
+void shell_run(u32 boot_sec, int verbose);
+
+#endif
