@@ -3,6 +3,8 @@
  * Freestanding: no libc. Output goes through sh_putc so `>` can capture. */
 #include "drivers.h"
 #include "shell.h"
+#include "wm.h"
+#include "vbe.h"
 
 /* ================= string helpers ================= */
 static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
@@ -797,6 +799,8 @@ static int b_poweroff(int argc, char **argv, const char *in) {
     halt_cpu();
     return 0;
 }
+static int b_gui(int argc, char **argv, const char *in);
+static int b_vgaregs(int argc, char **argv, const char *in);
 
 /* man pages */
 static const char MAN_HELP[] =
@@ -840,6 +844,13 @@ static const char MAN_REBOOT[] = "reboot - reboot the machine\nUsage: reboot\n";
 static const char MAN_HALT[] =
     "halt/poweroff - halt the CPU\nUsage: halt\n";
 static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
+static const char MAN_GUI[] =
+    "gui - graphical desktop\nUsage: gui\n"
+    "640x480 VBE + window manager demo.\n"
+    "Click: focus/drag, X button: close, Esc: back to shell.\n";
+static const char MAN_VGAREGS[] =
+    "vgaregs - dump VGA registers\nUsage: vgaregs\n"
+    "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -850,7 +861,7 @@ static int b_help(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     sh_print("Commands: help man echo printf clear uname whoami hostname ver\n"
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
-             "  history true false test exit reboot halt poweroff\n"
+             "  history true false test exit reboot halt poweroff gui vgaregs\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -887,6 +898,8 @@ static const cmd_t cmds[] = {
     {"reboot", "reboot", MAN_REBOOT, b_reboot},
     {"halt", "halt CPU", MAN_HALT, b_poweroff},
     {"poweroff", "halt CPU", MAN_HALT, b_poweroff},
+    {"gui", "graphical desktop", MAN_GUI, b_gui},
+    {"vgaregs", "dump VGA regs", MAN_VGAREGS, b_vgaregs},
     {0, 0, 0, 0},
 };
 
@@ -910,6 +923,56 @@ static int b_man(int argc, char **argv, const char *in) {
         else sh_print(found->man);
     }
     return rc;
+}
+
+static void sh_hex8(u8 v) {
+    const char *h = "0123456789ABCDEF";
+    sh_putc(h[(v >> 4) & 15]);
+    sh_putc(h[v & 15]);
+}
+static int b_vgaregs(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    int i;
+    sh_print("MISC="); sh_hex8(inb(0x3CC)); sh_putc('\n');
+    sh_print("SEQ=");
+    for (i = 0; i < 5; i++) { outb(0x3C4, (u8)i); sh_hex8(inb(0x3C5)); sh_putc(' '); }
+    sh_putc('\n');
+    sh_print("CRTC=");
+    for (i = 0; i < 25; i++) { outb(0x3D4, (u8)i); sh_hex8(inb(0x3D5)); sh_putc(i == 12 ? '\n' : ' '); }
+    sh_putc('\n');
+    sh_print("GC=");
+    for (i = 0; i < 9; i++) { outb(0x3CE, (u8)i); sh_hex8(inb(0x3CF)); sh_putc(' '); }
+    sh_putc('\n');
+    sh_print("AC=");
+    for (i = 0; i < 21; i++) {
+        (void)inb(0x3DA);
+        outb(0x3C0, (u8)i);
+        sh_hex8(inb(0x3C1));
+        sh_putc(' ');
+    }
+    sh_putc('\n');
+    (void)inb(0x3DA);
+    outb(0x3C0, 0x20);
+    sh_print("DAC0-7=");
+    outb(0x3C8, 0);
+    for (i = 0; i < 8 * 3; i++) { sh_hex8(inb(0x3C9)); sh_putc(' '); }
+    sh_putc('\n');
+    vbe_state();
+    return 0;
+}
+
+static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)argv; (void)in;
+    vga_print("Entering GUI (Esc exits)...\n");
+    int r = wm_init();
+    if (r) {
+        sh_eprint(r == 2 ? "gui: PS/2 mouse init failed, retry gui\n"
+                         : "gui: VBE unavailable (need -vga std)\n");
+        return 1;
+    }
+    wm_run();   /* restores VGA text on return */
+    vga_clear();  /* VRAM content is lost across the VBE switch */
+    vga_setcursor(vga_row(), vga_col());
+    return 0;
 }
 
 static int dispatch(int argc, char **argv, const char *in) {

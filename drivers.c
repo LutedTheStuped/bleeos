@@ -96,7 +96,9 @@ static int shift_on, caps_on, ctrl_on;
 
 int kbd_trykey(void) {
     static int ext = 0;
-    if (!(inb(0x64) & 0x01)) return -1;
+    u8 st = inb(0x64);
+    if (!(st & 0x01)) return -1;
+    if (st & 0x20) return -1;   /* AUX (mouse) byte: leave it */
     u8 sc = inb(0x60);
 
     if (!ext && sc == 0xE0) { ext = 1; return -1; }

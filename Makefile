@@ -11,7 +11,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o
 
 all: os.img
 
@@ -32,6 +32,21 @@ shell.o: shell.c shell.h drivers.h
 
 kernel.o: kernel.c drivers.h boot.h shell.h
 	$(CC) $(CFLAGS) -c kernel.c -o kernel.o
+
+vbe.o: vbe.c vbe.h drivers.h
+	$(CC) $(CFLAGS) -c vbe.c -o vbe.o
+
+gfx.o: gfx.c gfx.h drivers.h
+	$(CC) $(CFLAGS) -c gfx.c -o gfx.o
+
+mouse.o: mouse.c mouse.h drivers.h
+	$(CC) $(CFLAGS) -c mouse.c -o mouse.o
+
+wm.o: wm.c wm.h vbe.h gfx.h mouse.h drivers.h
+	$(CC) $(CFLAGS) -c wm.c -o wm.o
+
+apps.o: apps.c apps.h wm.h gfx.h drivers.h
+	$(CC) $(CFLAGS) -c apps.c -o apps.o
 
 kernel.elf: $(OBJS) linker.ld
 	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)
@@ -54,10 +69,10 @@ os.img: boot.bin kernel.bin
 	@echo "Built os.img ($$(stat -c%s os.img) bytes)"
 
 run: os.img
-	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+	$(QEMU) -vga std -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 run-hd: os.img
-	$(QEMU) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
+	$(QEMU) -vga std -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
