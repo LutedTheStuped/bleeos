@@ -50,3 +50,51 @@ Requires `nasm`, 32-bit-capable `gcc`, `binutils`, `qemu-system-i386`.
 make
 make run
 ```
+
+## Testing input (PS/2) and screenshots
+
+`make run-debug` starts the VM with HMP and QMP sockets. PS/2 keyboard
+and mouse are QEMU's default pc devices — no extra flags needed. (Do not
+use `-nographic` for input tests: stdio is wired to the serial port,
+which BleeOS doesn't drive, so keystrokes would never reach the guest.)
+
+HMP monitor (`/tmp/opencode/qemu-mon`), e.g. with `socat`:
+
+```sh
+# keyboard (NOTE: the space key is called `spc`, not `space`)
+sendkey u
+sendkey n
+sendkey a
+sendkey m
+sendkey e
+sendkey spc
+sendkey minus
+sendkey a
+sendkey ret
+# screenshot (PPM; convert with pnmtopng/ffmpeg)
+screendump /tmp/opencode/shot.ppm
+# read guest RAM (quote the path: unquoted / is division)
+pmemsave 0xb8000 4000 "/tmp/opencode/vga.bin"
+```
+
+QMP mouse (`/tmp/opencode/qmp.sock`): handshake first, then events.
+
+```json
+{"execute": "qmp_capabilities"}
+{"execute": "input-send-event", "arguments": {"events": [
+  {"type": "rel", "data": {"axis": "x", "value": -190}},
+  {"type": "rel", "data": {"axis": "y", "value": -82}}]}}
+{"execute": "input-send-event", "arguments": {"events": [
+  {"type": "btn", "data": {"down": true, "button": "left"}}]}}
+{"execute": "input-send-event", "arguments": {"events": [
+  {"type": "btn", "data": {"down": false, "button": "left"}}]}}
+```
+
+Full command if not using the Makefile target:
+
+```sh
+qemu-system-i386 -accel kvm:tcg -vga std -display none \
+  -monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+  -qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+  -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+```

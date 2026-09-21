@@ -77,6 +77,16 @@ run-hd: os.img
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
 
+# Debug/test VM: HMP monitor + QMP sockets for sendkey, mouse events,
+# screendump/pmemsave. PS/2 kbd+mouse are the default pc devices.
+# NOTE: do NOT use -nographic here: stdio goes to the serial port,
+# which BleeOS doesn't drive, so typed keys would never reach the guest.
+run-debug: os.img
+	$(QEMU) -accel kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+
 clean:
 	rm -f boot.bin $(OBJS) kernel.elf kernel.bin os.img
 
