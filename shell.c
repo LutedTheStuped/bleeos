@@ -5,6 +5,7 @@
 #include "shell.h"
 #include "wm.h"
 #include "vbe.h"
+#include "login.h"
 
 /* ================= string helpers ================= */
 static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
@@ -270,6 +271,8 @@ static const char *my_hostname(void) {
     }
     return "bleeos";
 }
+
+const char *shell_hostname(void) { return my_hostname(); }
 
 /* ================= parser ================= */
 /* segment ops */
@@ -801,7 +804,6 @@ static int b_poweroff(int argc, char **argv, const char *in) {
 }
 static int b_gui(int argc, char **argv, const char *in);
 static int b_vgaregs(int argc, char **argv, const char *in);
-
 /* man pages */
 static const char MAN_HELP[] =
     "help - list commands\nUsage: help\nSee also: man <command>.\n";
@@ -846,8 +848,11 @@ static const char MAN_HALT[] =
 static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
 static const char MAN_GUI[] =
     "gui - graphical desktop\nUsage: gui\n"
-    "640x480 VBE + window manager demo.\n"
-    "Click: focus/drag, X button: close, Esc: back to shell.\n";
+    "Login screen (any password), then 640x480 VBE desktop.\n"
+    "Left click: focus/drag, right click: menu, X: close.\n"
+    "Menu: display settings (resolution), calculator, reboot,\n"
+    "power off, log out. Esc in desktop logs out, Esc at\n"
+    "login returns to shell.\n";
 static const char MAN_VGAREGS[] =
     "vgaregs - dump VGA registers\nUsage: vgaregs\n"
     "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
@@ -962,14 +967,18 @@ static int b_vgaregs(int argc, char **argv, const char *in) {
 }
 
 static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)argv; (void)in;
-    vga_print("Entering GUI (Esc exits)...\n");
+    vga_print("Starting GUI...\n");
     int r = wm_init();
     if (r) {
         sh_eprint(r == 2 ? "gui: PS/2 mouse init failed, retry gui\n"
                          : "gui: VBE unavailable (need -vga std)\n");
         return 1;
     }
-    wm_run();   /* restores VGA text on return */
+    for (;;) {
+        if (!login_run()) break;   /* Esc: back to shell */
+        wm_run();                  /* Esc/log out: back to login */
+    }
+    vbe_disable();
     vga_clear();  /* VRAM content is lost across the VBE switch */
     vga_setcursor(vga_row(), vga_col());
     return 0;

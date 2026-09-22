@@ -37,10 +37,15 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## GUI (`gui` command)
 
-640x480x32 Bochs VBE desktop (needs `-vga std`, already in `make run`).
-Click focuses/drags windows, the X button closes, `Esc` returns to the
-shell (text mode is reprogrammed, font restored, screen repainted).
-Demo apps: **Counter** (click +1) and **SysInfo** (live CMOS clock).
+Ly-style login (any password — no user DB yet), then a 640x480x32
+Bochs VBE desktop (needs `-vga std`, already in `make run`).
+Left click focuses/drags windows, right click opens the menu
+(Display settings, Calculator, Reboot, Power off, Log out),
+X button closes. `Esc` in the desktop logs out to the login
+screen; `Esc` at login returns to the shell.
+Demo apps: **Counter** (click +1), **SysInfo** (live CMOS clock),
+**Calculator** (integer), **Display** settings (640x480, 800x600,
+1024x768 applied live). Taskbar shows `user@bleeos` + live clock.
 
 ## Build & run
 

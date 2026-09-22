@@ -29,10 +29,45 @@ static int dragging;
 static int drag_dx, drag_dy;
 static int dirty = 1;
 static int quit;
+static char wm_user[32] = "guest";
+
+/* right-click desktop menu */
+static int menu_open, menu_x, menu_y, menu_hover;
+#define MENU_N 5
+static const char *menu_items[MENU_N] = {
+    "Display settings", "Calculator", "Reboot", "Power off", "Log out",
+};
+#define MENU_W 200
+#define MENU_H (MENU_N * 22 + 8)
 
 void wm_dirty(void) { dirty = 1; }
 void wm_mouse_xy(int *x, int *y) { *x = mx; *y = my; }
 int wm_nwin(void) { return norder; }
+void wm_set_user(const char *name) {
+    int i = 0;
+    while (name[i] && i < 31) { wm_user[i] = name[i]; i++; }
+    wm_user[i] = 0;
+    dirty = 1;
+}
+
+int wm_set_resolution(int w, int h) {
+    if (w == gfx_w() && h == gfx_h()) return 0;
+    if (vbe_set(w, h, 32)) return -1;
+    gfx_init((u32 *)vbe_lfb(), w, h);
+    if (mx >= w) mx = w - 1;
+    if (my >= h) my = h - 1;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!wins[i].used) continue;
+        if (wins[i].x + wins[i].w > w) wins[i].x = w - wins[i].w;
+        if (wins[i].y + wins[i].h > h) wins[i].y = h - wins[i].h;
+        if (wins[i].x < 0) wins[i].x = 0;
+        if (wins[i].y < 0) wins[i].y = 0;
+    }
+    menu_open = 0;
+    dragging = 0;
+    dirty = 1;
+    return 0;
+}
 
 win_t *wm_open(const char *title, int x, int y, int w, int h,
                void (*draw)(win_t *, int, int),
@@ -95,6 +130,28 @@ static int in_title(win_t *w, int x, int y) {
     return x >= w->x && y >= w->y && x < w->x + w->w && y < w->y + TITLE_H;
 }
 
+static void draw_menu(void) {
+    int x = menu_x, y = menu_y;
+    if (x + MENU_W > gfx_w()) x = gfx_w() - MENU_W;
+    if (y + MENU_H > gfx_h()) y = gfx_h() - MENU_H;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    gfx_fill(x, y, MENU_W, MENU_H, C_BORD);
+    gfx_fill(x + 1, y + 1, MENU_W - 2, MENU_H - 2, C_BAR);
+    menu_x = x; menu_y = y;   /* remember clamped pos for hit test */
+    menu_hover = -1;
+    for (int i = 0; i < MENU_N; i++) {
+        int iy = y + 4 + i * 22;
+        int hov = mx >= x + 3 && mx < x + MENU_W - 3 &&
+                  my >= iy && my < iy + 22;
+        if (hov) {
+            menu_hover = i;
+            gfx_fill(x + 3, iy, MENU_W - 6, 22, C_TACT);
+        }
+        gfx_text(x + 12, iy + 7, menu_items[i], C_TTEXT, GFX_TRANS);
+    }
+}
+
 static void draw_cursor(void) {
     /* arrow: white with black outline */
     static const char *rows[10] = {
@@ -118,11 +175,23 @@ static void draw_all(void) {
     /* desktop: two-tone bands */
     for (int y = 0; y < H; y++)
         gfx_hline(0, y, W, (y & 16) ? C_DESK : C_DESK2);
-    /* hint bar */
+    /* hint bar with user (left) and live clock (right) */
     gfx_fill(0, H - 22, W, 22, C_BAR);
     gfx_hline(0, H - 22, W, C_BORD);
-    gfx_text(8, H - 15, "BleeOS WM  Esc: exit shell   Click: focus/drag   X: close",
-             RGB(200, 210, 220), GFX_TRANS);
+    {
+        char left[48], clock[20];
+        int i = 0;
+        while (wm_user[i] && i < 30) { left[i] = wm_user[i]; i++; }
+        left[i++] = '@';
+        left[i++] = 'b'; left[i++] = 'l'; left[i++] = 'e';
+        left[i++] = 'e'; left[i++] = 'o'; left[i++] = 's';
+        left[i] = 0;
+        gfx_text(8, H - 15, left, RGB(140, 220, 140), GFX_TRANS);
+        gfx_text(8 + gfx_textw(left) + 16, H - 15, "right-click: menu",
+                 RGB(200, 210, 220), GFX_TRANS);
+        rtc_format(clock);
+        gfx_text(W - 8 - 19 * 8, H - 15, clock, RGB(200, 210, 220), GFX_TRANS);
+    }
     for (int oi = 0; oi < norder; oi++) {
         win_t *w = &wins[order[oi]];
         int top = (oi == norder - 1);
@@ -144,11 +213,46 @@ static void draw_all(void) {
             gfx_noclip();
         }
     }
+    if (menu_open) draw_menu();
     draw_cursor();
+}
+
+static void menu_action(int idx) {
+    extern void apps_open_display(void);
+    extern void apps_open_calc(void);
+    menu_open = 0;
+    dirty = 1;
+    if (idx == 0) apps_open_display();
+    else if (idx == 1) apps_open_calc();
+    else if (idx == 2) reboot();
+    else if (idx == 3) halt_cpu();
+    else if (idx == 4) quit = 1;    /* log out -> login screen */
+}
+
+static int menu_hit(int x, int y) {
+    if (!menu_open) return -1;
+    if (x < menu_x || y < menu_y || x >= menu_x + MENU_W || y >= menu_y + MENU_H)
+        return -2;   /* outside */
+    int i = (y - menu_y - 4) / 22;
+    if (i < 0 || i >= MENU_N) return -2;
+    return i;
+}
+
+static void menu_clamp(void) {
+    if (menu_x + MENU_W > gfx_w()) menu_x = gfx_w() - MENU_W;
+    if (menu_y + MENU_H > gfx_h()) menu_y = gfx_h() - MENU_H;
+    if (menu_x < 0) menu_x = 0;
+    if (menu_y < 0) menu_y = 0;
 }
 
 static void on_button(int down) {
     if (down) {
+        if (menu_open) {   /* menu eats the click */
+            int hit = menu_hit(mx, my);
+            if (hit >= 0) menu_action(hit);
+            else { menu_open = 0; dirty = 1; }
+            return;
+        }
         int idx = win_at(mx, my);
         if (idx < 0) { dragging = 0; return; }
         wm_focus(idx);
@@ -182,6 +286,9 @@ void wm_run(void) {
     extern void apps_open_demo(void);
     int last_btn = 0;
     u32 tick = 0;
+    for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
+    norder = 0; dragging = 0; quit = 0; menu_open = 0; dirty = 1;
+    mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;
     apps_open_demo();
     draw_all();
     for (;;) {
@@ -195,6 +302,15 @@ void wm_run(void) {
             mbtn = btn;
             if ((btn & 1) && !(last_btn & 1)) on_button(1);
             else if (!(btn & 1) && (last_btn & 1)) on_button(0);
+            if ((btn & 2) && !(last_btn & 2)) {
+                /* right click: toggle menu here */
+                if (menu_open) { menu_open = 0; dirty = 1; }
+                else {
+                    menu_x = mx; menu_y = my;
+                    menu_clamp();
+                    menu_open = 1; dragging = 0; dirty = 1;
+                }
+            }
             else if (dragging) {
                 int idx = norder ? order[norder - 1] : -1;
                 if (idx >= 0) {
@@ -210,11 +326,14 @@ void wm_run(void) {
             dirty = 1;
         }
         int k = kbd_trykey();
-        if (k == 27) break;             /* Esc exits */
+        if (k == 27) {
+            if (menu_open) { menu_open = 0; dirty = 1; }
+            else break;             /* Esc: log out to login screen */
+        }
         if (quit) break;
         tick++;
         if (dirty || (tick & 31) == 0) { draw_all(); dirty = 0; }
         sleep_ms(10);
     }
-    vbe_disable();
+    /* no vbe_disable here: b_gui owns the graphics session (login loop) */
 }

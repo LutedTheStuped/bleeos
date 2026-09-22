@@ -20,6 +20,8 @@ void wm_run(void);     /* event loop; Esc or last-close exits, restores text */
 void wm_dirty(void);
 void wm_mouse_xy(int *x, int *y);
 int  wm_nwin(void);
+void wm_set_user(const char *name);
+int  wm_set_resolution(int w, int h);  /* live VBE re-set; 0 ok */
 win_t *wm_open(const char *title, int x, int y, int w, int h,
                void (*draw)(win_t *, int, int),
                void (*click)(win_t *, int, int, int), void *data);

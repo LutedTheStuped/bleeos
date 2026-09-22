@@ -5,5 +5,6 @@
 #include "drivers.h"
 
 void shell_run(u32 boot_sec, int verbose);
+const char *shell_hostname(void);
 
 #endif

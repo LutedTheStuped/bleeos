@@ -3,5 +3,7 @@
 #define APPS_H
 
 void apps_open_demo(void);   /* opens Counter + SysInfo */
+void apps_open_calc(void);
+void apps_open_display(void);
 
 #endif

@@ -146,7 +146,10 @@ int vbe_set(int w, int h, int bpp) {
     if (bpp != 32) return -1;   /* XRGB8888 only for now */
     u32 lfb = find_lfb();
     if (!lfb) lfb = 0xE0000000u;    /* QEMU/Bochs default */
-    font_save();                    /* snapshot SeaBIOS font first */
+    /* save the text font only from text mode; in graphics mode the
+     * planes hold LFB pixels, not a font */
+    static int font_valid = 0;
+    if (!font_valid) { font_save(); font_valid = 1; }
     vbe_write(VBE_ENABLE, 0);       /* disable first */
     vbe_write(VBE_XRES, (u16)w);
     vbe_write(VBE_YRES, (u16)h);
