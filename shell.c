@@ -8,6 +8,7 @@
 #include "login.h"
 #include "ata.h"
 #include "users.h"
+#include "uhci.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -831,6 +832,7 @@ static int b_passwd(int argc, char **argv, const char *in);
 static int b_useradd(int argc, char **argv, const char *in);
 static int b_userdel(int argc, char **argv, const char *in);
 static int b_users(int argc, char **argv, const char *in);
+static int b_usb(int argc, char **argv, const char *in);
 static int b_vgaregs(int argc, char **argv, const char *in);
 /* man pages */
 static const char MAN_HELP[] =
@@ -902,6 +904,11 @@ static const char MAN_USERS[] =
     "  passwd [NAME] set password (root sets any, users own)\n"
     "  su [NAME]     switch user (password unless root)\n"
     "Default login: root / root. GUI login uses the same DB.\n";
+static const char MAN_USB[] =
+    "usb - UHCI detector (stub)\nUsage: usb [probe]\n"
+    "Shows the UHCI controller I/O base and per-port attach\n"
+    "state. No transfers, no enumeration: PS/2 stays the input\n"
+    "path. Needs -device piix3-usb-uhci to show anything.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -913,7 +920,7 @@ static int b_help(int argc, char **argv, const char *in) {
     sh_print("Commands: help man echo printf clear uname whoami hostname ver\n"
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
-             "  install logout su passwd useradd userdel users\n"
+             "  install logout su passwd useradd userdel users usb\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -959,6 +966,7 @@ static const cmd_t cmds[] = {
     {"useradd", "add user", MAN_USERS, b_useradd},
     {"userdel", "delete user", MAN_USERS, b_userdel},
     {"users", "list users", MAN_USERS, b_users},
+    {"usb", "USB devices", MAN_USB, b_usb},
     {0, 0, 0, 0},
 };
 
@@ -1256,6 +1264,29 @@ static int b_users(int argc, char **argv, const char *in) {
         sh_putc('\n');
         if (buf[i] == '\n') i++;
     }
+    return 0;
+}
+
+static int b_usb(int argc, char **argv, const char *in) {
+    (void)in;
+    char num[12];
+    if (!uhci_present()) {
+        sh_print("usb: no UHCI controller found"
+                 " (try -device piix3-usb-uhci)\n");
+        return 1;
+    }
+    sh_print("usb: UHCI @");
+    sh_print(sutoa(uhci_iobase(), num, 10, 0));
+    sh_print(" (stub detector: no transfers, PS/2 active)\n");
+    for (int p = 0; p < uhci_nports(); p++) {
+        int c = uhci_connected(p);
+        sh_print("port");
+        sh_print(sitoa(p, num));
+        sh_print(c > 0 ? ": device attached\n" :
+                 c == 0 ? ": empty\n" : ": error\n");
+    }
+    if (argc > 1 && scmp(argv[1], "probe") == 0)
+        sh_print("usb probe: unimplemented (stub detector only)\n");
     return 0;
 }
 

@@ -4,6 +4,8 @@
 #include "boot.h"
 #include "shell.h"
 #include "ata.h"
+#include "usb.h"
+#include "uhci.h"
 
 static int has_opt(const char *cmdline, const char *opt) {
     int ol = 0;
@@ -56,6 +58,21 @@ void kernel_main(const boot_info_t *info) {
             vga_print(" (");
             vga_print(utoa10(d.sectors / 2048, num));
             vga_print(" MB) - `install` writes BleeOS to it\n");
+        }
+    }
+    {
+        /* USB stub: detector only, PS/2 stays live */
+        usb_scan();
+        if (uhci_present()) {
+            char num[12];
+            int c0 = uhci_connected(0), c1 = uhci_connected(1);
+            vga_print("usb: UHCI detected @");
+            vga_print(utoa10(uhci_iobase(), num));
+            vga_print(" p0=");
+            vga_print(c0 > 0 ? "dev" : "empty");
+            vga_print(" p1=");
+            vga_print(c1 > 0 ? "dev" : "empty");
+            vga_print(" (stub, PS/2 active)\n");
         }
     }
     shell_run(info ? info->boot_sec : 0, verbose);

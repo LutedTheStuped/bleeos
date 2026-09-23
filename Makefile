@@ -11,7 +11,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o
 
 all: os.img
 
@@ -57,6 +57,12 @@ ata.o: ata.c ata.h drivers.h
 users.o: users.c users.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c users.c -o users.o
 
+uhci.o: uhci.c uhci.h drivers.h
+	$(CC) $(CFLAGS) -c uhci.c -o uhci.o
+
+usb.o: usb.c usb.h uhci.h drivers.h
+	$(CC) $(CFLAGS) -c usb.c -o usb.o
+
 kernel.elf: $(OBJS) linker.ld
 	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)
 
@@ -85,6 +91,15 @@ run-hd: os.img
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
+
+# USB bring-up rig: UHCI + USB keyboard/mouse. Enumeration only;
+# PS/2 stays the input path (see `usb` command).
+run-usb: os.img
+	$(QEMU) -accel kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
+		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 # HDD test rig: blank disk on IDE primary master. Boot the floppy,
 # run `install`, then boot the disk itself with run-hdd.

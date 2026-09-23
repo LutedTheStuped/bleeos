@@ -52,6 +52,13 @@ grade, not real security). Default login is `root` / `root`.
 `whoami` manage the session. The GUI login uses the same DB.
 ramfs is volatile: added users vanish on reboot.
 
+## USB (`usb` command)
+Stub UHCI detector: PCI-probes the controller and reports per-port
+attach state at boot and via `usb`. No resets, no transfers — the
+BIOS-owned controller is left alone and PS/2 stays the input path.
+Full UHCI enumeration was attempted and dropped (TDs never complete
+on QEMU's UHCI); the stub keeps the door open without the risk.
+
 ## GUI (`gui` command)
 
 Ly-style login (any password — no user DB yet), then a 640x480x32
