@@ -194,21 +194,35 @@ void apps_open_calc(void) {
 
 /* ---------- Display settings ---------- */
 static const int disp_modes[3][2] = { { 640, 480 }, { 800, 600 }, { 1024, 768 } };
+#define DISP_CUSTOM_Y (34 + 3 * 34)   /* client y of the Custom button */
+#define DISP_HINT_Y (DISP_CUSTOM_Y + 26 + 8)  /* client y of hint line */
+/* hint text (8) + padding (8) + titlebar (20) + border (2) */
+#define DISP_H (DISP_HINT_Y + 38)
+
+/* custom-resolution editor state */
+static win_t *disp_win;
+static int disp_custom;      /* 1 while typing a custom WxH */
+static int disp_err;         /* 1 when last entry was invalid */
+static char disp_buf[16];
+static int disp_len;
+
+static void disp_num(char *b, int *k, int v) {
+    char t[8];
+    int n = 0;
+    if (!v) b[(*k)++] = '0';
+    while (v && n < 8) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) b[(*k)++] = t[--n];
+}
 
 static void disp_draw(win_t *w, int cx, int cy) {
     (void)w;
     gfx_text(cx + 16, cy + 10, "Resolution:", RGB(20, 20, 20), GFX_TRANS);
     for (int i = 0; i < 3; i++) {
         char b[16];
-        int v = disp_modes[i][0], k = 0, t[8], n = 0;
-        if (!v) b[k++] = '0';
-        while (v && n < 8) { t[n++] = v % 10; v /= 10; }
-        while (n) b[k++] = (char)('0' + t[--n]);
+        int k = 0;
+        disp_num(b, &k, disp_modes[i][0]);
         b[k++] = 'x';
-        v = disp_modes[i][1]; n = 0;
-        if (!v) b[k++] = '0';
-        while (v && n < 8) { t[n++] = v % 10; v /= 10; }
-        while (n) b[k++] = (char)('0' + t[--n]);
+        disp_num(b, &k, disp_modes[i][1]);
         b[k] = 0;
         int by = cy + 34 + i * 34;
         int cur = gfx_w() == disp_modes[i][0] && gfx_h() == disp_modes[i][1];
@@ -216,17 +230,100 @@ static void disp_draw(win_t *w, int cx, int cy) {
         gfx_rect(cx + 16, by, 200, 26, RGB(20, 20, 20));
         gfx_text(cx + 26, by + 9, b, RGB(255, 255, 255), GFX_TRANS);
     }
+    /* Custom button: shows the typed WxH + cursor while editing */
+    {
+        char b[20];
+        int k = 0;
+        const char *t = "Custom: ";
+        while (*t) b[k++] = *t++;
+        for (int i = 0; i < disp_len && k < 17; i++) b[k++] = disp_buf[i];
+        if (disp_custom && k < 19) b[k++] = '_';
+        b[k] = 0;
+        int by = cy + DISP_CUSTOM_Y;
+        gfx_fill(cx + 16, by, 200, 26,
+                 disp_custom ? RGB(30, 90, 170) : RGB(90, 90, 160));
+        gfx_rect(cx + 16, by, 200, 26, RGB(20, 20, 20));
+        gfx_text(cx + 26, by + 9, b, RGB(255, 255, 255), GFX_TRANS);
+    }
+    if (disp_err)
+        gfx_text(cx + 16, cy + DISP_HINT_Y, "320-1920 x 200-1200",
+                 RGB(200, 40, 40), GFX_TRANS);
+    else if (disp_custom)
+        gfx_text(cx + 16, cy + DISP_HINT_Y, "Type WxH, Enter=apply",
+                 RGB(20, 20, 20), GFX_TRANS);
 }
+
+/* parse "W x H" (digits, one x); 0 ok, else -1 */
+static int disp_parse(const char *s, int *w, int *h) {
+    int a = 0, b = 0, i = 0, digits = 0;
+    if (!s[0]) return -1;
+    while (s[i] >= '0' && s[i] <= '9') { a = a * 10 + s[i] - '0'; digits++; i++; }
+    if (!digits || s[i] != 'x') return -1;
+    i++; digits = 0;
+    while (s[i] >= '0' && s[i] <= '9') { b = b * 10 + s[i] - '0'; digits++; i++; }
+    if (!digits || s[i]) return -1;
+    if (a < 320 || a > 1920 || b < 200 || b > 1200) return -1;
+    if (a & 7) return -1;   /* VBE line width must be a multiple of 8 */
+    *w = a; *h = b;
+    return 0;
+}
+
 static void disp_click(win_t *w, int x, int y, int btn) {
     (void)w; (void)btn;
     for (int i = 0; i < 3; i++) {
         int by = 34 + i * 34;
         if (x >= 16 && y >= by && x < 216 && y < by + 26) {
+            disp_custom = 0; disp_err = 0;
             wm_set_resolution(disp_modes[i][0], disp_modes[i][1]);
             return;
         }
     }
+    if (x >= 16 && y >= DISP_CUSTOM_Y && x < 216 && y < DISP_CUSTOM_Y + 26) {
+        disp_custom ^= 1;   /* toggle the editor */
+        disp_err = 0;
+        if (!disp_custom) { disp_len = 0; disp_buf[0] = 0; }
+        wm_dirty();
+    }
+}
+
+/* key routing for the custom editor: 1 = consumed. Deactivates if the
+ * Display window was closed mid-edit so keys are never swallowed. */
+int apps_custom_key(int k) {
+    if (!disp_custom) return 0;
+    if (!disp_win || !disp_win->used) { disp_custom = 0; return 0; }
+    if (k == 27) {   /* Esc cancels the editor (not the session) */
+        disp_custom = 0; disp_err = 0; disp_len = 0; disp_buf[0] = 0;
+        wm_dirty();
+        return 1;
+    }
+    if (k == '\b') {
+        if (disp_len > 0) { disp_buf[--disp_len] = 0; disp_err = 0; }
+        wm_dirty();
+        return 1;
+    }
+    if (k == '\n') {
+        int w, h;
+        if (disp_parse(disp_buf, &w, &h) == 0 &&
+            wm_set_resolution(w, h) == 0) {
+            disp_custom = 0; disp_err = 0; disp_len = 0; disp_buf[0] = 0;
+        } else {
+            disp_err = 1;
+        }
+        wm_dirty();
+        return 1;
+    }
+    if ((k >= '0' && k <= '9') || k == 'x' || k == 'X') {
+        if (disp_len < 15) {
+            disp_buf[disp_len++] = k == 'X' ? 'x' : (char)k;
+            disp_buf[disp_len] = 0;
+            disp_err = 0;
+        }
+        wm_dirty();
+        return 1;
+    }
+    return 1;   /* swallow the rest while editing */
 }
 void apps_open_display(void) {
-    wm_open("Display", 180, 140, 248, 34 + 3 * 34 + 16, disp_draw, disp_click, 0);
+    disp_custom = 0; disp_err = 0; disp_len = 0; disp_buf[0] = 0;
+    disp_win = wm_open("Display", 180, 140, 248, DISP_H, disp_draw, disp_click, 0);
 }

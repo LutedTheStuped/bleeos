@@ -5,6 +5,7 @@
 #include "vbe.h"
 #include "gfx.h"
 #include "mouse.h"
+#include "apps.h"
 
 #define MAXWIN 8
 #define TITLE_H 20
@@ -329,7 +330,9 @@ void wm_run(void) {
             dirty = 1;
         }
         int k = kbd_trykey();
-        if (k == 27) {
+        if (k != -1 && apps_custom_key(k)) {
+            /* custom-res editor ate it (Esc there cancels, not logs out) */
+        } else if (k == 27) {
             if (menu_open) { menu_open = 0; dirty = 1; }
             else break;             /* Esc: log out to login screen */
         }

@@ -3,7 +3,8 @@
 
 /* Double buffering: everything draws into a shadow buffer in extended
  * memory (1MB+, free: kernel ends below 640K, nothing lives above 1MB),
- * sized for the largest mode (1024x768x32 = 3MB, ends at 4MB).
+ * sized for the largest allowed mode (1920x1200x32, ends near 10MB).
+ * Only the current frame's bytes are ever touched.
  * gfx_present() blits one full frame to the visible LFB. Drawing to
  * cacheable RAM + a single rep-movsl flush beats per-pixel LFB writes
  * and eliminates mid-frame tearing. */

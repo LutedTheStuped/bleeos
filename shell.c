@@ -851,8 +851,10 @@ static const char MAN_GUI[] =
     "Login screen (any password), then 640x480 VBE desktop.\n"
     "Left click: focus/drag, right click: menu, X: close.\n"
     "Menu: display settings (resolution), calculator, reboot,\n"
-    "power off, log out. Esc in desktop logs out, Esc at\n"
-    "login returns to shell.\n";
+    "power off, log out. Display has presets plus Custom:\n"
+    "click it, type WxH (320-1920 x 200-1200, W a multiple\n"
+    "of 8), Enter applies, Esc cancels. Esc in desktop logs\n"
+    "out, Esc at login returns to shell.\n";
 static const char MAN_VGAREGS[] =
     "vgaregs - dump VGA registers\nUsage: vgaregs\n"
     "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
