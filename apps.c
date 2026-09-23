@@ -194,14 +194,33 @@ void apps_open_calc(void) {
 
 /* ---------- Display settings ---------- */
 static const int disp_modes[3][2] = { { 640, 480 }, { 800, 600 }, { 1024, 768 } };
-#define DISP_CUSTOM_Y (34 + 3 * 34)   /* client y of the Custom button */
-#define DISP_HINT_Y (DISP_CUSTOM_Y + 26 + 8)  /* client y of hint line */
-/* hint text (8) + padding (8) + titlebar (20) + border (2) */
-#define DISP_H (DISP_HINT_Y + 38)
+/* every screen type the backend takes: 320-1920 x 200-1200, W a multiple
+ * of 8 (the Custom editor's rules), 32bpp. Sorted; the checkbox below
+ * swaps the 3 presets for this whole table, filled down each column. */
+static const int disp_types[][2] = {
+    { 320, 200 },   { 320, 240 },   { 400, 300 },   { 512, 384 },
+    { 640, 400 },   { 640, 480 },   { 800, 480 },   { 800, 600 },
+    { 1024, 576 },  { 1024, 768 },  { 1152, 864 },  { 1280, 720 },
+    { 1280, 768 },  { 1280, 800 },  { 1280, 960 },  { 1280, 1024 },
+    { 1360, 768 },  { 1440, 900 },  { 1440, 1080 }, { 1600, 900 },
+    { 1600, 1200 }, { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 },
+};
+#define DISP_NPRESET ((int)(sizeof disp_modes / sizeof disp_modes[0]))  /* 3 */
+#define DISP_NTYPE   ((int)(sizeof disp_types / sizeof disp_types[0]))  /* 24 */
+
+#define DISP_CHECK_Y 24     /* client y of the checkbox */
+#define DISP_LIST_Y  48     /* client y of the first mode button */
+#define DISP_BTN_H   26
+#define DISP_PITCH   34     /* preset list: one column */
+#define DISP_APITCH  30     /* full list: three columns, tighter */
+#define DISP_ABW     96     /* full list button width */
+#define DISP_AW      340    /* window width, full list */
+#define DISP_W       248    /* window width, presets */
 
 /* custom-resolution editor state */
 static win_t *disp_win;
 static int disp_custom;      /* 1 while typing a custom WxH */
+static int disp_all;         /* checkbox: show every supported type */
 static int disp_err;         /* 1 when last entry was invalid */
 static char disp_buf[16];
 static int disp_len;
@@ -214,21 +233,54 @@ static void disp_num(char *b, int *k, int v) {
     while (n) b[(*k)++] = t[--n];
 }
 
+static int disp_ncols(void) { return disp_all ? 3 : 1; }
+static int disp_nrows(void) {
+    int n = disp_all ? DISP_NTYPE : DISP_NPRESET;
+    return (n + disp_ncols() - 1) / disp_ncols();
+}
+/* client rect of mode button i (shared by draw + hit test) */
+static void disp_slot(int i, int *bx, int *by, int *bw) {
+    int rows = disp_nrows();
+    *bx = 16 + (i / rows) * (DISP_ABW + 8);
+    *by = DISP_LIST_Y + (i % rows) * (disp_all ? DISP_APITCH : DISP_PITCH);
+    *bw = disp_all ? DISP_ABW : 200;
+}
+static const int *disp_at(int i) {
+    return disp_all ? disp_types[i] : disp_modes[i];
+}
+static int disp_custom_y(void) {   /* client y of the Custom button */
+    return DISP_LIST_Y + disp_nrows() * (disp_all ? DISP_APITCH : DISP_PITCH);
+}
+static int disp_height(void) {   /* custom + hint (26+8) + chrome (8+20+2) */
+    return disp_custom_y() + 34 + 38;
+}
+static int disp_width(void) { return disp_all ? DISP_AW : DISP_W; }
+
 static void disp_draw(win_t *w, int cx, int cy) {
     (void)w;
     gfx_text(cx + 16, cy + 10, "Resolution:", RGB(20, 20, 20), GFX_TRANS);
-    for (int i = 0; i < 3; i++) {
+    /* checkbox: swap the preset list for every supported screen type */
+    gfx_fill(cx + 16, cy + DISP_CHECK_Y, 14, 14, RGB(255, 255, 255));
+    gfx_rect(cx + 16, cy + DISP_CHECK_Y, 14, 14, RGB(20, 20, 20));
+    if (disp_all)
+        gfx_text(cx + 20, cy + DISP_CHECK_Y + 3, "X",
+                 RGB(20, 20, 20), GFX_TRANS);
+    gfx_text(cx + 38, cy + DISP_CHECK_Y + 3, "Show all screen types",
+             RGB(20, 20, 20), GFX_TRANS);
+    for (int i = 0, n = disp_all ? DISP_NTYPE : DISP_NPRESET; i < n; i++) {
+        const int *m = disp_at(i);
         char b[16];
-        int k = 0;
-        disp_num(b, &k, disp_modes[i][0]);
+        int k = 0, bx, by, bw;
+        disp_num(b, &k, m[0]);
         b[k++] = 'x';
-        disp_num(b, &k, disp_modes[i][1]);
+        disp_num(b, &k, m[1]);
         b[k] = 0;
-        int by = cy + 34 + i * 34;
-        int cur = gfx_w() == disp_modes[i][0] && gfx_h() == disp_modes[i][1];
-        gfx_fill(cx + 16, by, 200, 26, cur ? RGB(40, 160, 70) : RGB(60, 120, 220));
-        gfx_rect(cx + 16, by, 200, 26, RGB(20, 20, 20));
-        gfx_text(cx + 26, by + 9, b, RGB(255, 255, 255), GFX_TRANS);
+        disp_slot(i, &bx, &by, &bw);
+        int cur = gfx_w() == m[0] && gfx_h() == m[1];
+        gfx_fill(cx + bx, cy + by, bw, DISP_BTN_H,
+                 cur ? RGB(40, 160, 70) : RGB(60, 120, 220));
+        gfx_rect(cx + bx, cy + by, bw, DISP_BTN_H, RGB(20, 20, 20));
+        gfx_text(cx + bx + 10, cy + by + 9, b, RGB(255, 255, 255), GFX_TRANS);
     }
     /* Custom button: shows the typed WxH + cursor while editing */
     {
@@ -239,17 +291,17 @@ static void disp_draw(win_t *w, int cx, int cy) {
         for (int i = 0; i < disp_len && k < 17; i++) b[k++] = disp_buf[i];
         if (disp_custom && k < 19) b[k++] = '_';
         b[k] = 0;
-        int by = cy + DISP_CUSTOM_Y;
+        int by = cy + disp_custom_y();
         gfx_fill(cx + 16, by, 200, 26,
                  disp_custom ? RGB(30, 90, 170) : RGB(90, 90, 160));
         gfx_rect(cx + 16, by, 200, 26, RGB(20, 20, 20));
         gfx_text(cx + 26, by + 9, b, RGB(255, 255, 255), GFX_TRANS);
     }
     if (disp_err)
-        gfx_text(cx + 16, cy + DISP_HINT_Y, "320-1920 x 200-1200",
+        gfx_text(cx + 16, cy + disp_custom_y() + 34, "320-1920 x 200-1200",
                  RGB(200, 40, 40), GFX_TRANS);
     else if (disp_custom)
-        gfx_text(cx + 16, cy + DISP_HINT_Y, "Type WxH, Enter=apply",
+        gfx_text(cx + 16, cy + disp_custom_y() + 34, "Type WxH, Enter=apply",
                  RGB(20, 20, 20), GFX_TRANS);
 }
 
@@ -270,15 +322,23 @@ static int disp_parse(const char *s, int *w, int *h) {
 
 static void disp_click(win_t *w, int x, int y, int btn) {
     (void)w; (void)btn;
-    for (int i = 0; i < 3; i++) {
-        int by = 34 + i * 34;
-        if (x >= 16 && y >= by && x < 216 && y < by + 26) {
+    /* checkbox: toggle the full list (the window grows/shrinks with it) */
+    if (x >= 16 && y >= DISP_CHECK_Y && x < 216 && y < DISP_CHECK_Y + 16) {
+        disp_all ^= 1;
+        wm_resize(disp_win, disp_width(), disp_height());
+        return;
+    }
+    for (int i = 0, n = disp_all ? DISP_NTYPE : DISP_NPRESET; i < n; i++) {
+        int bx, by, bw;
+        disp_slot(i, &bx, &by, &bw);
+        if (x >= bx && y >= by && x < bx + bw && y < by + DISP_BTN_H) {
             disp_custom = 0; disp_err = 0;
-            wm_set_resolution(disp_modes[i][0], disp_modes[i][1]);
+            wm_set_resolution(disp_at(i)[0], disp_at(i)[1]);
             return;
         }
     }
-    if (x >= 16 && y >= DISP_CUSTOM_Y && x < 216 && y < DISP_CUSTOM_Y + 26) {
+    int by = disp_custom_y();
+    if (x >= 16 && y >= by && x < 216 && y < by + 26) {
         disp_custom ^= 1;   /* toggle the editor */
         disp_err = 0;
         if (!disp_custom) { disp_len = 0; disp_buf[0] = 0; }
@@ -325,5 +385,7 @@ int apps_custom_key(int k) {
 }
 void apps_open_display(void) {
     disp_custom = 0; disp_err = 0; disp_len = 0; disp_buf[0] = 0;
-    disp_win = wm_open("Display", 180, 140, 248, DISP_H, disp_draw, disp_click, 0);
+    disp_all = 0;
+    disp_win = wm_open("Display", 180, 140, disp_width(), disp_height(),
+                       disp_draw, disp_click, 0);
 }

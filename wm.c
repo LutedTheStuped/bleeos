@@ -71,6 +71,18 @@ int wm_set_resolution(int w, int h) {
     return 0;
 }
 
+/* change a window's size, keeping it on screen (same clamping the
+ * resolution change uses). Layout is recomputed by the app on draw. */
+void wm_resize(win_t *w, int width, int height) {
+    if (!w || !w->used) return;
+    w->w = width; w->h = height;
+    if (w->x + w->w > gfx_w()) w->x = gfx_w() - w->w;
+    if (w->y + w->h > gfx_h()) w->y = gfx_h() - w->h;
+    if (w->x < 0) w->x = 0;
+    if (w->y < 0) w->y = 0;
+    dirty = 1;
+}
+
 win_t *wm_open(const char *title, int x, int y, int w, int h,
                void (*draw)(win_t *, int, int),
                void (*click)(win_t *, int, int, int), void *data) {
