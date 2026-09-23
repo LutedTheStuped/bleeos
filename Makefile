@@ -4,9 +4,11 @@ LD=ld
 OBJCOPY=objcopy
 QEMU=qemu-system-i386
 
-# Keep the VGA device enabled, but avoid opening a host window when no
-# graphical session is available. Override with DISPLAY_BACKEND=gtk/none.
-DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),gtk,none)
+# Keep the VGA device enabled and prefer SDL for the host window. Fall back
+# to no display only when no graphical session is available.
+# The reason for SDL, is it locks your cursor when you click on the window
+# So its easier to navigate
+DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
 STAGE2_SECTORS=160
@@ -88,10 +90,10 @@ os.img: boot.bin kernel.bin
 	@echo "Built os.img ($$(stat -c%s os.img) bytes)"
 
 run: os.img
-	$(QEMU) -vga std -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 run-hd: os.img
-	$(QEMU) -vga std -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
