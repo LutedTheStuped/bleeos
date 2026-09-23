@@ -73,4 +73,7 @@ void rtc_format(char *out);         /* "YYYY-MM-DD HH:MM:SS" (needs 20 bytes) */
 void reboot(void);
 void halt_cpu(void);                /* cli + hlt loop, never returns */
 
+/* ---------- tiny number formatting (no libc) ---------- */
+char *utoa10(u32 v, char *buf);     /* decimal, NUL-terminated, returns buf */
+
 #endif

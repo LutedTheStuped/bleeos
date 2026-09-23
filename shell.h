@@ -6,5 +6,6 @@
 
 void shell_run(u32 boot_sec, int verbose);
 const char *shell_hostname(void);
+int shell_readline(char *buf);   /* line editor; len, -1 EOF, -2 cancel */
 
 #endif

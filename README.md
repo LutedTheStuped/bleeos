@@ -35,6 +35,14 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 `exit` (or Ctrl+D on an empty line) drops back to the boot manager.
 
+## Hard disk (`install` command)
+ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
+detected primary master at boot; `install` is a TUI wizard that
+confirms with YES, writes the boot sector + kernel (129 sectors,
+snapshotted from RAM) to LBA 0, and verifies by read-back.
+Tested end-to-end: `make run-install` (floppy + blank `hdd.img`),
+`install`, then `make run-hdd` boots BleeOS from the hard disk.
+
 ## GUI (`gui` command)
 
 Ly-style login (any password — no user DB yet), then a 640x480x32

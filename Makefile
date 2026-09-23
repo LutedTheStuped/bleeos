@@ -11,7 +11,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o
 
 all: os.img
 
@@ -51,6 +51,9 @@ apps.o: apps.c apps.h wm.h gfx.h drivers.h
 login.o: login.c login.h gfx.h drivers.h shell.h wm.h
 	$(CC) $(CFLAGS) -c login.c -o login.o
 
+ata.o: ata.c ata.h drivers.h
+	$(CC) $(CFLAGS) -c ata.c -o ata.o
+
 kernel.elf: $(OBJS) linker.ld
 	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)
 
@@ -79,6 +82,24 @@ run-hd: os.img
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
+
+# HDD test rig: blank disk on IDE primary master. Boot the floppy,
+# run `install`, then boot the disk itself with run-hdd.
+hdd.img:
+	qemu-img create -f raw hdd.img 100M
+
+run-install: os.img hdd.img
+	$(QEMU) -accel kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on \
+		-drive file=hdd.img,format=raw,if=ide -net none
+
+run-hdd: hdd.img
+	$(QEMU) -accel kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 # Debug/test VM: HMP monitor + QMP sockets for sendkey, mouse events,
 # screendump/pmemsave. PS/2 kbd+mouse are the default pc devices.

@@ -6,6 +6,7 @@
 #include "wm.h"
 #include "vbe.h"
 #include "login.h"
+#include "ata.h"
 
 /* ================= string helpers ================= */
 static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
@@ -803,6 +804,7 @@ static int b_poweroff(int argc, char **argv, const char *in) {
     return 0;
 }
 static int b_gui(int argc, char **argv, const char *in);
+static int b_install(int argc, char **argv, const char *in);
 static int b_vgaregs(int argc, char **argv, const char *in);
 /* man pages */
 static const char MAN_HELP[] =
@@ -858,6 +860,12 @@ static const char MAN_GUI[] =
 static const char MAN_VGAREGS[] =
     "vgaregs - dump VGA registers\nUsage: vgaregs\n"
     "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
+static const char MAN_INSTALL[] =
+    "install - write BleeOS to hard disk\nUsage: install\n"
+    "TUI wizard for the ATA primary master disk: shows the\n"
+    "drive, asks for YES, writes boot sector + kernel (129\n"
+    "sectors) to LBA 0 and verifies by read-back. Destroys\n"
+    "all data on that disk. Boot it with `-boot order=c`.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -869,6 +877,7 @@ static int b_help(int argc, char **argv, const char *in) {
     sh_print("Commands: help man echo printf clear uname whoami hostname ver\n"
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
+             "  install\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -907,6 +916,7 @@ static const cmd_t cmds[] = {
     {"poweroff", "halt CPU", MAN_HALT, b_poweroff},
     {"gui", "graphical desktop", MAN_GUI, b_gui},
     {"vgaregs", "dump VGA regs", MAN_VGAREGS, b_vgaregs},
+    {"install", "install to HDD", MAN_INSTALL, b_install},
     {0, 0, 0, 0},
 };
 
@@ -983,6 +993,99 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
     vbe_disable();
     vga_clear();  /* VRAM content is lost across the VBE switch */
     vga_setcursor(vga_row(), vga_col());
+    return 0;
+}
+
+/* installer image: MBR + stage2 as loaded by the bootloader, still
+ * intact in RAM (nothing reuses 0x7C00+ after boot) */
+#define INSTALL_SRC ((const u8 *)0x7C00u)
+#define INSTALL_SECTORS 129   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+/* snapshot area: free RAM below the stack. The image contains live
+ * .data (cursor position, flags) that our own progress printing
+ * mutates, so freeze a copy first and write/verify from that. */
+#define INSTALL_SNAP ((u8 *)0x30000u)
+
+static int b_install(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    ata_dev_t d;
+    char num[16];
+    if (ata_info(0, &d)) {
+        sh_eprint("install: no ATA primary master disk found\n");
+        return 1;
+    }
+    if (d.sectors < INSTALL_SECTORS) {
+        sh_eprint("install: disk too small (need 129 sectors)\n");
+        return 1;
+    }
+    if (INSTALL_SRC[510] != 0x55 || INSTALL_SRC[511] != 0xAA) {
+        sh_eprint("install: boot image not intact in RAM;"
+                  " reboot from floppy and retry\n");
+        return 1;
+    }
+    sh_print("BleeOS installer\nTarget: ATA primary master ");
+    sh_print(d.model);
+    sh_print(" (");
+    sh_print(sutoa(d.sectors / 2048, num, 10, 0));
+    sh_print(" MB)\nWrites boot sector + kernel (129 sectors) to LBA 0.\n"
+             "ALL DATA ON THE DISK WILL BE DESTROYED.\nType YES to install: ");
+    static char ans[256];
+    int r = shell_readline(ans);
+    if (r < 0 || scmp(ans, "YES") != 0) {
+        sh_print("Aborted.\n");
+        return 1;
+    }
+    sh_print("Writing");
+    for (u32 i = 0; i < INSTALL_SECTORS * 512; i++)
+        INSTALL_SNAP[i] = INSTALL_SRC[i];
+    for (u32 s = 0; s < INSTALL_SECTORS;) {
+        u32 n = INSTALL_SECTORS - s;
+        if (n > 32) n = 32;
+        if (ata_write(0, s, INSTALL_SNAP + s * 512, n)) {
+            sh_print(" FAILED at sector ");
+            sh_print(sutoa(s, num, 10, 0));
+            sh_putc('\n');
+            return 1;
+        }
+        s += n;
+        sh_putc('.');
+    }
+    sh_print(" verifying");
+    /* sector-by-sector with a STACK buffer: any static buffer would
+     * live in .bss, i.e. inside the source image, and clobber it */
+    u8 sec[512];
+    for (u32 s = 0; s < INSTALL_SECTORS; s++) {
+        if (ata_read(0, s, sec, 1)) {
+            sh_print(" READ FAILED at sector ");
+            sh_print(sutoa(s, num, 10, 0));
+            sh_putc('\n');
+            return 1;
+        }
+        u32 bad = 512;
+        for (u32 i = 0; i < 512; i++) {
+            if (sec[i] != INSTALL_SNAP[s * 512 + i]) { bad = i; break; }
+        }
+        if (bad < 512) {
+            const u8 *sp = INSTALL_SNAP + s * 512;
+            u32 ssum = 0, dsum = 0;
+            for (u32 i = 0; i < 512; i++) { ssum += sp[i]; dsum += sec[i]; }
+            sh_print(" MISMATCH at sector ");
+            sh_print(sutoa(s, num, 10, 0));
+            sh_print(" off=");
+            sh_print(sutoa(bad, num, 10, 0));
+            sh_print(" src=");
+            sh_print(sutoa(sp[bad], num, 16, 0));
+            sh_print(" disk=");
+            sh_print(sutoa(sec[bad], num, 16, 0));
+            sh_print(" srcsum=");
+            sh_print(sutoa(ssum, num, 16, 0));
+            sh_print(" disksum=");
+            sh_print(sutoa(dsum, num, 16, 0));
+            sh_putc('\n');
+            return 1;
+        }
+        if ((s & 7) == 7) sh_putc('.');
+    }
+    sh_print("\nInstalled. Boot the disk (`-boot order=c`, no floppy).\n");
     return 0;
 }
 

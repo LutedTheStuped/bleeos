@@ -3,6 +3,7 @@
 #include "drivers.h"
 #include "boot.h"
 #include "shell.h"
+#include "ata.h"
 
 static int has_opt(const char *cmdline, const char *opt) {
     int ol = 0;
@@ -46,6 +47,17 @@ void kernel_main(const boot_info_t *info) {
         vga_print("verbose: VGA 80x25, PS/2 poll, PIT/RTC, ramfs mounted on /\n");
     }
     vga_print("Type `help` for commands, `exit` for boot menu.\n");
+    if (ata_init() == 0) {
+        ata_dev_t d;
+        char num[16];
+        if (ata_info(0, &d) == 0) {
+            vga_print("ata: primary master ");
+            vga_print(d.model);
+            vga_print(" (");
+            vga_print(utoa10(d.sectors / 2048, num));
+            vga_print(" MB) - `install` writes BleeOS to it\n");
+        }
+    }
     shell_run(info ? info->boot_sec : 0, verbose);
     vga_print("\nBack to boot menu...\n");
     sleep_ms(600);

@@ -179,6 +179,17 @@ void sleep_ms(u32 ms) {
     }
 }
 
+/* ================= misc ================= */
+char *utoa10(u32 v, char *buf) {
+    char t[11];
+    int n = 0, k = 0;
+    if (!v) t[n++] = '0';
+    while (v && n < 11) { t[n++] = (char)('0' + v % 10); v /= 10; }
+    while (n) buf[k++] = t[--n];
+    buf[k] = 0;
+    return buf;
+}
+
 /* ================= CMOS RTC ================= */
 static u8 cmos_read(u8 reg) {
     outb(0x70, reg & 0x7F);   /* keep NMI enabled; boot runs with IRQs off */
