@@ -21,5 +21,7 @@ void gfx_textn(int x, int y, const char *s, int n, u32 fg, u32 bg);
 int  gfx_textw(const char *s);
 int  gfx_w(void);
 int  gfx_h(void);
+/* blit the shadow buffer to the visible LFB (call after a frame) */
+void gfx_present(void);
 
 #endif

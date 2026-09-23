@@ -1,12 +1,22 @@
 /* Framebuffer drawing + built-in 8x8 font (chars 0x20-0x7E). */
 #include "gfx.h"
 
-static u32 *fb;
+/* Double buffering: everything draws into a shadow buffer in extended
+ * memory (1MB+, free: kernel ends below 640K, nothing lives above 1MB),
+ * sized for the largest mode (1024x768x32 = 3MB, ends at 4MB).
+ * gfx_present() blits one full frame to the visible LFB. Drawing to
+ * cacheable RAM + a single rep-movsl flush beats per-pixel LFB writes
+ * and eliminates mid-frame tearing. */
+#define SHADOW_BASE ((u32 *)0x100000u)
+
+static u32 *fb;    /* visible LFB */
+static u32 *draw;  /* shadow buffer */
 static int fw, fh;
 static int cx0, cy0, cx1, cy1;   /* clip rect, exclusive max */
 
 void gfx_init(u32 *f, int w, int h) {
     fb = f; fw = w; fh = h;
+    if (!draw) draw = SHADOW_BASE;
     gfx_noclip();
 }
 void gfx_clip(int x, int y, int w, int h) {
@@ -21,7 +31,7 @@ int gfx_h(void) { return fh; }
 
 void gfx_pixel(int x, int y, u32 c) {
     if (x < cx0 || y < cy0 || x >= cx1 || y >= cy1) return;
-    fb[y * fw + x] = c;
+    draw[y * fw + x] = c;
 }
 void gfx_fill(int x, int y, int w, int h, u32 c) {
     if (x < cx0) { w -= cx0 - x; x = cx0; }
@@ -30,7 +40,7 @@ void gfx_fill(int x, int y, int w, int h, u32 c) {
     if (y + h > cy1) h = cy1 - y;
     if (w <= 0 || h <= 0) return;
     for (int j = 0; j < h; j++) {
-        u32 *row = fb + (y + j) * fw + x;
+        u32 *row = draw + (y + j) * fw + x;
         for (int i = 0; i < w; i++) row[i] = c;
     }
 }
@@ -169,4 +179,12 @@ int gfx_textw(const char *s) {
     int n = 0;
     while (s[n]) n++;
     return n * 8;
+}
+
+void gfx_present(void) {
+    u32 n = (u32)(fw * fh);
+    u32 *s = draw, *d = fb;
+    __asm__ volatile ("cld; rep movsl"
+                      : "+S" (s), "+D" (d), "+c" (n)
+                      : : "memory");
 }

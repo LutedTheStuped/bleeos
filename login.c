@@ -53,6 +53,7 @@ static void draw_login(const char *user, const char *pass, int field,
     if (field == 1)
         gfx_fill(bx + 26 + gfx_textw(masked), by + 80, 7, 8, C_TXT);
     login_text(bx + 20, by + 104, "Enter: next/login   Esc: cancel", C_DIM);
+    gfx_present();
 }
 
 int login_run(void) {

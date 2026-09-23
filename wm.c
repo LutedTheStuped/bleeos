@@ -1,4 +1,5 @@
-/* Tiny compositor: direct-to-LFB redraw on dirty flag + 500ms tick.
+/* Tiny compositor: renders to a shadow buffer, one rep-movsl blit per
+ * frame via gfx_present(). Redraws on dirty flag or RTC second change.
  * Layout: border 2px, titlebar 20px, close 16x16 top-right. */
 #include "wm.h"
 #include "vbe.h"
@@ -172,9 +173,10 @@ static void draw_cursor(void) {
 static void draw_all(void) {
     int W = gfx_w(), H = gfx_h();
     gfx_noclip();
-    /* desktop: two-tone bands */
-    for (int y = 0; y < H; y++)
-        gfx_hline(0, y, W, (y & 16) ? C_DESK : C_DESK2);
+    /* desktop: two-tone 16px bands (one fill + band fills, not 480 hlines) */
+    gfx_fill(0, 0, W, H, C_DESK2);
+    for (int y = 0; y < H; y += 32)
+        gfx_fill(0, y + 16, W, 16, C_DESK);
     /* hint bar with user (left) and live clock (right) */
     gfx_fill(0, H - 22, W, 22, C_BAR);
     gfx_hline(0, H - 22, W, C_BORD);
@@ -215,6 +217,7 @@ static void draw_all(void) {
     }
     if (menu_open) draw_menu();
     draw_cursor();
+    gfx_present();   /* single blit: no mid-frame tearing */
 }
 
 static void menu_action(int idx) {
@@ -285,7 +288,7 @@ int wm_init(void) {
 void wm_run(void) {
     extern void apps_open_demo(void);
     int last_btn = 0;
-    u32 tick = 0;
+    u32 last_sec = rtc_seconds();
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
     norder = 0; dragging = 0; quit = 0; menu_open = 0; dirty = 1;
     mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;
@@ -331,8 +334,9 @@ void wm_run(void) {
             else break;             /* Esc: log out to login screen */
         }
         if (quit) break;
-        tick++;
-        if (dirty || (tick & 31) == 0) { draw_all(); dirty = 0; }
+        /* clocks show seconds: refresh on change, not on a fixed tick */
+        u32 now = rtc_seconds();
+        if (dirty || now != last_sec) { draw_all(); dirty = 0; last_sec = now; }
         sleep_ms(10);
     }
     /* no vbe_disable here: b_gui owns the graphics session (login loop) */

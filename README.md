@@ -46,6 +46,9 @@ screen; `Esc` at login returns to the shell.
 Demo apps: **Counter** (click +1), **SysInfo** (live CMOS clock),
 **Calculator** (integer), **Display** settings (640x480, 800x600,
 1024x768 applied live). Taskbar shows `user@bleeos` + live clock.
+Compositor is double-buffered (1MB shadow buffer, one `rep movsl`
+blit per frame — no tearing) and redraws on input or RTC second
+change, not on a fixed tick.
 
 ## Build & run
 
