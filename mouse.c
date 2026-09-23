@@ -20,8 +20,16 @@ static int aux_write(u8 b) {
     return 0;
 }
 static int aux_expect(u8 want) {
-    if (wait_obf(1)) return -1;
-    return inb(0x60) == want ? 0 : -1;
+    /* match only AUX bytes: a keyboard byte arriving first must not
+     * be mistaken for the mouse ACK */
+    for (volatile int i = 0; i < 200000; i++) {
+        u8 st = inb(0x64);
+        if (!(st & 0x01)) continue;
+        u8 b = inb(0x60);
+        if (!(st & 0x20)) continue;   /* keyboard byte: ignore */
+        return b == want ? 0 : -1;
+    }
+    return -1;
 }
 static void flush_obf(void) {
     for (int i = 0; i < 64; i++) {
@@ -29,6 +37,9 @@ static void flush_obf(void) {
         (void)inb(0x60);
     }
 }
+
+static u8 pkt[3];
+static int n;
 
 int mouse_init(void) {
     /* retry: PS/2 timeouts can fire spuriously under host load */
@@ -76,15 +87,28 @@ static int mouse_tryinit(void) {
     flush_obf();
     if (aux_write(0xF6)) return -1;
     if (aux_expect(0xFA)) return -1;
+    /* 60Hz sample rate (F3 3C): 16.6ms packet interval gives the polled
+     * loop headroom so fast moves don't overrun the 1-byte 8042 buffer.
+     * Best-effort: a failure leaves the 100Hz default, still usable. */
+    if (aux_write(0xF3) == 0 && aux_expect(0xFA) == 0) {
+        if (aux_write(60) == 0) aux_expect(0xFA);
+    }
     if (aux_write(0xF4)) return -1;   /* enable data reporting */
     if (aux_expect(0xFA)) return -1;
     flush_obf();
+    n = 0;
     return 0;
 }
 
+void mouse_resync(void) { n = 0; }   /* drop a stale partial packet */
+
+/* nonzero while an unread mouse byte waits (packets arrived mid-frame) */
+int mouse_pending(void) {
+    u8 st = inb(0x64);
+    return (st & 0x01) && (st & 0x20);
+}
+
 int mouse_poll(int *dx, int *dy, int *btn) {
-    static u8 pkt[3];
-    static int n;
     u8 st = inb(0x64);
     if (!(st & 0x01) || !(st & 0x20)) return 0;   /* no mouse byte */
     u8 b = inb(0x60);

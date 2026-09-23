@@ -293,6 +293,7 @@ void wm_run(void) {
     for (int i = 0; i < MAXWIN; i++) wins[i].used = 0;  /* fresh session */
     norder = 0; dragging = 0; quit = 0; menu_open = 0; dirty = 1;
     mx = gfx_w() / 2; my = gfx_h() / 2; mbtn = 0;
+    mouse_resync();
     apps_open_demo();
     draw_all();
     for (;;) {
@@ -340,7 +341,10 @@ void wm_run(void) {
         /* clocks show seconds: refresh on change, not on a fixed tick */
         u32 now = rtc_seconds();
         if (dirty || now != last_sec) { draw_all(); dirty = 0; last_sec = now; }
-        sleep_ms(10);
+        /* packets that arrived mid-render: catch up now instead of
+         * sleeping, or fast moves overrun the 1-byte 8042 buffer */
+        if (mouse_pending()) continue;
+        sleep_ms(5);
     }
     /* no vbe_disable here: b_gui owns the graphics session (login loop) */
 }
