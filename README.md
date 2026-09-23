@@ -38,10 +38,19 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 ## Hard disk (`install` command)
 ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a TUI wizard that
-confirms with YES, writes the boot sector + kernel (129 sectors,
+confirms with YES, writes the boot sector + kernel (161 sectors,
 snapshotted from RAM) to LBA 0, and verifies by read-back.
 Tested end-to-end: `make run-install` (floppy + blank `hdd.img`),
 `install`, then `make run-hdd` boots BleeOS from the hard disk.
+
+## Users (TUI login + database)
+Boot drops to a `hostname login:` prompt checked against
+`/etc/passwd` + `/etc/shadow` (salted/iterated hashes — hobby
+grade, not real security). Default login is `root` / `root`.
+`logout` returns to the prompt (`#` for root, `$` for users);
+`useradd`/`userdel` (root only), `passwd`, `su`, `users`,
+`whoami` manage the session. The GUI login uses the same DB.
+ramfs is volatile: added users vanish on reboot.
 
 ## GUI (`gui` command)
 

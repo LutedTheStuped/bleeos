@@ -76,4 +76,8 @@ void halt_cpu(void);                /* cli + hlt loop, never returns */
 /* ---------- tiny number formatting (no libc) ---------- */
 char *utoa10(u32 v, char *buf);     /* decimal, NUL-terminated, returns buf */
 
+/* ---------- tiny strings (no libc) ---------- */
+u32 slen(const char *s);
+int scmp(const char *a, const char *b);   /* 0 = equal */
+
 #endif

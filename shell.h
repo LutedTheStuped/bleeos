@@ -7,5 +7,10 @@
 void shell_run(u32 boot_sec, int verbose);
 const char *shell_hostname(void);
 int shell_readline(char *buf);   /* line editor; len, -1 EOF, -2 cancel */
+int shell_readpass(char *buf, u32 cap);  /* masked entry; len, -1 cancel */
+int shell_uid(void);             /* current login uid */
+const char *shell_user(void);    /* current login name */
+int shell_fread(const char *path, char *buf, u32 cap);  /* bytes, -1 */
+int shell_fwrite(const char *path, const char *data, u32 len);  /* 0 ok */
 
 #endif

@@ -5,13 +5,13 @@ OBJCOPY=objcopy
 QEMU=qemu-system-i386
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=128
+STAGE2_SECTORS=160
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o
 
 all: os.img
 
@@ -48,11 +48,14 @@ wm.o: wm.c wm.h vbe.h gfx.h mouse.h drivers.h
 apps.o: apps.c apps.h wm.h gfx.h drivers.h
 	$(CC) $(CFLAGS) -c apps.c -o apps.o
 
-login.o: login.c login.h gfx.h drivers.h shell.h wm.h
+login.o: login.c login.h gfx.h drivers.h shell.h wm.h users.h
 	$(CC) $(CFLAGS) -c login.c -o login.o
 
 ata.o: ata.c ata.h drivers.h
 	$(CC) $(CFLAGS) -c ata.c -o ata.o
+
+users.o: users.c users.h shell.h drivers.h
+	$(CC) $(CFLAGS) -c users.c -o users.o
 
 kernel.elf: $(OBJS) linker.ld
 	$(LD) -m elf_i386 -T linker.ld -o kernel.elf $(OBJS)

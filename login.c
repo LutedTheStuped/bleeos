@@ -5,6 +5,7 @@
 #include "drivers.h"
 #include "shell.h"
 #include "wm.h"
+#include "users.h"
 
 #define C_BG     RGB(10, 14, 26)
 #define C_BOX    RGB(24, 32, 54)
@@ -15,6 +16,7 @@
 #define C_ACCENT RGB(80, 170, 255)
 
 static char wm_user_buf[32];
+static int login_fail;   /* show "Login incorrect" until next key */
 
 static void login_text(int x, int y, const char *s, u32 c) {
     gfx_text(x, y, s, c, GFX_TRANS);
@@ -53,6 +55,8 @@ static void draw_login(const char *user, const char *pass, int field,
     if (field == 1)
         gfx_fill(bx + 26 + gfx_textw(masked), by + 80, 7, 8, C_TXT);
     login_text(bx + 20, by + 104, "Enter: next/login   Esc: cancel", C_DIM);
+    if (login_fail)
+        login_text(bx + 20, by + 118, "Login incorrect", RGB(255, 90, 90));
     gfx_present();
 }
 
@@ -73,6 +77,7 @@ int login_run(void) {
         }
         int k = kbd_trykey();
         if (k == -1) { sleep_ms(50); continue; }
+        if (k != -1) login_fail = 0;
         if (k == 27) return 0;                       /* Esc: abort */
         if (k == '\t' || k == KEY_UP || k == KEY_DOWN) {
             field ^= 1;
@@ -81,17 +86,16 @@ int login_run(void) {
         }
         if (k == '\n') {
             if (field == 0) { field = 1; }
-            else {
+            else if (users_auth(user, pass)) {
                 int i = 0;
                 while (user[i] && i < 31) { wm_user_buf[i] = user[i]; i++; }
                 wm_user_buf[i] = 0;
-                if (!wm_user_buf[0]) {
-                    wm_user_buf[0] = 'g'; wm_user_buf[1] = 'u';
-                    wm_user_buf[2] = 'e'; wm_user_buf[3] = 's';
-                    wm_user_buf[4] = 't'; wm_user_buf[5] = 0;
-                }
                 wm_set_user(wm_user_buf);
+                for (int j = 0; j < 32; j++) pass[j] = 0;
                 return 1;
+            } else {
+                login_fail = 1;
+                plen = 0; pass[0] = 0;
             }
             draw_login(user, pass, field, clock, shell_hostname());
             continue;

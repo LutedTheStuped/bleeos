@@ -7,13 +7,9 @@
 #include "vbe.h"
 #include "login.h"
 #include "ata.h"
+#include "users.h"
 
 /* ================= string helpers ================= */
-static u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
-static int scmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return (int)(u8)*a - (int)(u8)*b;
-}
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
 static void smemset(void *p, int v, u32 n) {
     u8 *b = (u8*)p;
@@ -248,6 +244,20 @@ static int fs_write(const char *path, const char *data, u32 len, int append) {
     return 0;
 }
 
+/* file access for other modules (users DB) */
+int shell_fread(const char *path, char *buf, u32 cap) {
+    int idx = fs_resolve(path);
+    if (idx < 0 || fs[idx].is_dir || cap == 0) return -1;
+    u32 n = fs[idx].size;
+    if (n > cap - 1) n = cap - 1;
+    for (u32 i = 0; i < n; i++) buf[i] = fs[idx].data[i];
+    buf[n] = 0;
+    return (int)n;
+}
+int shell_fwrite(const char *path, const char *data, u32 len) {
+    return fs_write(path, data, len, 0);
+}
+
 static void fs_init(void) {
     smemset(fs, 0, sizeof(fs));
     fs[0].used = 1; fs[0].is_dir = 1;
@@ -416,6 +426,15 @@ static int tokenize(char *seg) {
 /* ================= builtins ================= */
 typedef int (*builtin_fn)(int argc, char **argv, const char *in);
 static int exit_flag, exit_code;
+static int logout_flag;
+
+/* current login session (set by shell_login / su) */
+static int cur_uid;
+static char cur_user[17];
+
+int shell_uid(void) { return cur_uid; }
+const char *shell_user(void) { return cur_user; }
+static void set_session(const char *name, int uid);
 
 static int b_help(int argc, char **argv, const char *in);
 static int b_man(int argc, char **argv, const char *in);
@@ -491,7 +510,8 @@ static int b_uname(int argc, char **argv, const char *in) {
 }
 static int b_whoami(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
-    sh_print("root\n");
+    sh_print(cur_user);
+    sh_putc('\n');
     return 0;
 }
 static int b_hostname(int argc, char **argv, const char *in) {
@@ -805,6 +825,12 @@ static int b_poweroff(int argc, char **argv, const char *in) {
 }
 static int b_gui(int argc, char **argv, const char *in);
 static int b_install(int argc, char **argv, const char *in);
+static int b_logout(int argc, char **argv, const char *in);
+static int b_su(int argc, char **argv, const char *in);
+static int b_passwd(int argc, char **argv, const char *in);
+static int b_useradd(int argc, char **argv, const char *in);
+static int b_userdel(int argc, char **argv, const char *in);
+static int b_users(int argc, char **argv, const char *in);
 static int b_vgaregs(int argc, char **argv, const char *in);
 /* man pages */
 static const char MAN_HELP[] =
@@ -850,7 +876,7 @@ static const char MAN_HALT[] =
 static const char MAN_VER[] = "ver - OS version\nUsage: ver\n";
 static const char MAN_GUI[] =
     "gui - graphical desktop\nUsage: gui\n"
-    "Login screen (any password), then 640x480 VBE desktop.\n"
+    "Login screen (checks /etc/shadow), then 640x480 VBE desktop.\n"
     "Left click: focus/drag, right click: menu, X: close.\n"
     "Menu: display settings (resolution), calculator, reboot,\n"
     "power off, log out. Display has presets plus Custom:\n"
@@ -863,9 +889,19 @@ static const char MAN_VGAREGS[] =
 static const char MAN_INSTALL[] =
     "install - write BleeOS to hard disk\nUsage: install\n"
     "TUI wizard for the ATA primary master disk: shows the\n"
-    "drive, asks for YES, writes boot sector + kernel (129\n"
+    "drive, asks for YES, writes boot sector + kernel (161\n"
     "sectors) to LBA 0 and verifies by read-back. Destroys\n"
     "all data on that disk. Boot it with `-boot order=c`.\n";
+static const char MAN_USERS[] =
+    "users - login accounts\n"
+    "TUI login at boot checks /etc/passwd + /etc/shadow\n"
+    "(salted hashes, ramfs: users vanish on reboot).\n"
+    "logout returns to the login prompt.\n"
+    "  useradd NAME  (root) create account, prompts password\n"
+    "  userdel NAME  (root) delete account (not root/self)\n"
+    "  passwd [NAME] set password (root sets any, users own)\n"
+    "  su [NAME]     switch user (password unless root)\n"
+    "Default login: root / root. GUI login uses the same DB.\n";
 static const char MAN_SHELL[] =
     "Shell syntax: ' \" quotes, \\ escape, $VAR $? $$,\n"
     "; && || lists, > FILE >> FILE (append), < FILE (stdin).\n"
@@ -877,7 +913,7 @@ static int b_help(int argc, char **argv, const char *in) {
     sh_print("Commands: help man echo printf clear uname whoami hostname ver\n"
              "  pwd ls cd mkdir touch rm cat env export unset sleep uptime date\n"
              "  history true false test exit reboot halt poweroff gui vgaregs\n"
-             "  install\n"
+             "  install logout su passwd useradd userdel users\n"
              "Syntax: ; && ||  $VAR $?  > >> <  quotes  (see `man shell`)\n");
     return 0;
 }
@@ -917,6 +953,12 @@ static const cmd_t cmds[] = {
     {"gui", "graphical desktop", MAN_GUI, b_gui},
     {"vgaregs", "dump VGA regs", MAN_VGAREGS, b_vgaregs},
     {"install", "install to HDD", MAN_INSTALL, b_install},
+    {"logout", "back to login", MAN_USERS, b_logout},
+    {"su", "switch user", MAN_USERS, b_su},
+    {"passwd", "set password", MAN_USERS, b_passwd},
+    {"useradd", "add user", MAN_USERS, b_useradd},
+    {"userdel", "delete user", MAN_USERS, b_userdel},
+    {"users", "list users", MAN_USERS, b_users},
     {0, 0, 0, 0},
 };
 
@@ -999,7 +1041,7 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 /* installer image: MBR + stage2 as loaded by the bootloader, still
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 129   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+#define INSTALL_SECTORS 161   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
 /* snapshot area: free RAM below the stack. The image contains live
  * .data (cursor position, flags) that our own progress printing
  * mutates, so freeze a copy first and write/verify from that. */
@@ -1014,7 +1056,7 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        sh_eprint("install: disk too small (need 129 sectors)\n");
+        sh_eprint("install: disk too small (need 161 sectors)\n");
         return 1;
     }
     if (INSTALL_SRC[510] != 0x55 || INSTALL_SRC[511] != 0xAA) {
@@ -1026,7 +1068,7 @@ static int b_install(int argc, char **argv, const char *in) {
     sh_print(d.model);
     sh_print(" (");
     sh_print(sutoa(d.sectors / 2048, num, 10, 0));
-    sh_print(" MB)\nWrites boot sector + kernel (129 sectors) to LBA 0.\n"
+    sh_print(" MB)\nWrites boot sector + kernel (161 sectors) to LBA 0.\n"
              "ALL DATA ON THE DISK WILL BE DESTROYED.\nType YES to install: ");
     static char ans[256];
     int r = shell_readline(ans);
@@ -1086,6 +1128,134 @@ static int b_install(int argc, char **argv, const char *in) {
         if ((s & 7) == 7) sh_putc('.');
     }
     sh_print("\nInstalled. Boot the disk (`-boot order=c`, no floppy).\n");
+    return 0;
+}
+
+static int read_new_pass(char *buf, u32 cap) {
+    char again[64];
+    sh_print("New password: ");
+    if (shell_readpass(buf, cap) < 0) return -1;
+    sh_print("Confirm: ");
+    if (shell_readpass(again, sizeof(again)) < 0) return -1;
+    if (scmp(buf, again) != 0) {
+        sh_eprint("Passwords do not match\n");
+        return -1;
+    }
+    if (!buf[0]) {
+        sh_eprint("Empty password not allowed\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int b_logout(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    logout_flag = 1;
+    return 0;
+}
+
+static int b_su(int argc, char **argv, const char *in) {
+    (void)in;
+    const char *target = argc > 1 ? argv[1] : "root";
+    if (argc > 2) { sh_eprint("su: too many arguments\n"); return 1; }
+    int uid = users_uid(target);
+    if (uid < 0) { sh_eprint("su: unknown user\n"); return 1; }
+    if (cur_uid != 0) {
+        static char pass[64];
+        sh_print("Password: ");
+        if (shell_readpass(pass, sizeof(pass)) < 0) return 1;
+        int ok = users_auth(target, pass);
+        smemset(pass, 0, sizeof(pass));
+        if (!ok) { sh_print("\nAuthentication failure\n"); return 1; }
+        sh_print("\n");
+    }
+    set_session(target, uid);
+    return 0;
+}
+
+static int b_passwd(int argc, char **argv, const char *in) {
+    (void)in;
+    const char *target = argc > 1 ? argv[1] : cur_user;
+    if (argc > 2) { sh_eprint("passwd: too many arguments\n"); return 1; }
+    if (users_uid(target) < 0) { sh_eprint("passwd: unknown user\n"); return 1; }
+    if (cur_uid != 0) {
+        if (scmp(target, cur_user) != 0) {
+            sh_eprint("passwd: permission denied (root only)\n");
+            return 1;
+        }
+        static char old[64];
+        sh_print("Old password: ");
+        if (shell_readpass(old, sizeof(old)) < 0) return 1;
+        int ok = users_auth(target, old);
+        smemset(old, 0, sizeof(old));
+        if (!ok) { sh_print("\nAuthentication failure\n"); return 1; }
+        sh_print("\n");
+    }
+    static char nw[64];
+    if (read_new_pass(nw, sizeof(nw)) < 0) return 1;
+    if (users_setpass(target, nw)) {
+        smemset(nw, 0, sizeof(nw));
+        sh_eprint("passwd: failed\n");
+        return 1;
+    }
+    smemset(nw, 0, sizeof(nw));
+    sh_print("Password updated\n");
+    return 0;
+}
+
+static int b_useradd(int argc, char **argv, const char *in) {
+    (void)in;
+    if (cur_uid != 0) { sh_eprint("useradd: root only\n"); return 1; }
+    if (argc != 2) { sh_eprint("Usage: useradd NAME\n"); return 1; }
+    if (!users_validname(argv[1])) {
+        sh_eprint("useradd: invalid name (a-z, 0-9, _, -, max 16)\n");
+        return 1;
+    }
+    static char nw[64];
+    if (read_new_pass(nw, sizeof(nw)) < 0) return 1;
+    if (users_add(argv[1], nw)) {
+        smemset(nw, 0, sizeof(nw));
+        sh_eprint("useradd: failed (exists or user limit)\n");
+        return 1;
+    }
+    smemset(nw, 0, sizeof(nw));
+    sh_print("User added\n");
+    return 0;
+}
+
+static int b_userdel(int argc, char **argv, const char *in) {
+    (void)in;
+    if (cur_uid != 0) { sh_eprint("userdel: root only\n"); return 1; }
+    if (argc != 2) { sh_eprint("Usage: userdel NAME\n"); return 1; }
+    if (scmp(argv[1], cur_user) == 0) {
+        sh_eprint("userdel: cannot delete yourself\n");
+        return 1;
+    }
+    if (users_del(argv[1])) {
+        sh_eprint("userdel: failed (root or unknown user)\n");
+        return 1;
+    }
+    sh_print("User deleted\n");
+    return 0;
+}
+
+static int b_users(int argc, char **argv, const char *in) {
+    (void)argc; (void)argv; (void)in;
+    char buf[768];
+    if (shell_fread("/etc/passwd", buf, sizeof(buf)) < 0) {
+        sh_eprint("users: no database\n");
+        return 1;
+    }
+    int i = 0;
+    while (buf[i]) {
+        int ls = i;
+        while (buf[i] && buf[i] != '\n') i++;
+        /* print name + uid fields */
+        int k = ls;
+        while (buf[k] && buf[k] != '\n') { sh_putc(buf[k]); k++; }
+        sh_putc('\n');
+        if (buf[i] == '\n') i++;
+    }
     return 0;
 }
 
@@ -1204,10 +1374,63 @@ int shell_readline(char *buf) {
 }
 
 /* ================= main loop ================= */
+int shell_readpass(char *buf, u32 cap) {
+    /* masked password entry: '*' echo, Enter returns len, Ctrl+C -1 */
+    u32 len = 0;
+    buf[0] = 0;
+    for (;;) {
+        int k = kbd_getkey();
+        if (k == '\n') { vga_putc('\n'); buf[len] = 0; return (int)len; }
+        if (k == 3) { vga_print("^C\n"); buf[0] = 0; return -1; }
+        if (k == '\b') {
+            if (len > 0) { len--; buf[len] = 0; vga_putc('\b'); }
+            continue;
+        }
+        if (k >= 32 && k < 127 && len + 1 < cap) {
+            buf[len++] = (char)k;
+            vga_putc('*');
+        }
+    }
+}
+
+static void set_session(const char *name, int uid) {
+    int i = 0;
+    while (name[i] && i < 16) { cur_user[i] = name[i]; i++; }
+    cur_user[i] = 0;
+    cur_uid = uid;
+}
+
+/* TUI login: returns 0 on success (session set), -1 on EOF (Ctrl+D) */
+static int shell_login(void) {
+    static char user[32], pass[64];
+    for (;;) {
+        vga_setcolor(0x0B);
+        vga_print(my_hostname());
+        vga_print(" login: ");
+        vga_setcolor(0x07);
+        int r = shell_readline(user);
+        if (r == -1) { vga_print("exit\n"); return -1; }
+        if (r == -2) { vga_print("^C\n"); continue; }
+        if (!user[0]) continue;
+        vga_print("Password: ");
+        if (shell_readpass(pass, sizeof(pass)) < 0) continue;
+        int ok = users_auth(user, pass);
+        smemset(pass, 0, sizeof(pass));
+        if (ok) {
+            int uid = users_uid(user);
+            set_session(user, uid < 0 ? 0 : uid);
+            vga_print("\n");
+            return 0;
+        }
+        vga_print("\nLogin incorrect\n");
+    }
+}
+
 void shell_run(u32 boot_sec, int verbose) {
     (void)verbose;
     g_boot_sec = boot_sec;
     fs_init();
+    users_init();   /* seed root if the DB is absent */
     smemset(envs, 0, sizeof(envs));
     smemset(hist, 0, sizeof(hist));
     hcount = 0;
@@ -1217,22 +1440,30 @@ void shell_run(u32 boot_sec, int verbose) {
     env_set("HOME", "/");
 
     static char line[256];
-    for (;;) {
-        vga_setcolor(0x0A);
-        vga_print("root@");
-        vga_print(my_hostname());
-        vga_setcolor(0x07);
-        vga_putc(':');
-        vga_setcolor(0x0C);
-        vga_print(cwd);
-        vga_setcolor(0x07);
-        vga_print("$ ");
-        int r = shell_readline(line);
-        if (r == -1) { vga_print("exit\n"); break; }
-        if (r == -2) { vga_print("^C\n"); last_status = 130; continue; }
-        if (!line[0]) continue;
-        hist_add(line);
-        run_line(line);
+    for (;;) {   /* login sessions */
+        set_session("?", -1);
+        if (shell_login() != 0) break;   /* Ctrl+D: back to boot menu */
+        logout_flag = 0;
+        for (;;) {
+            vga_setcolor(0x0A);
+            vga_print(cur_user);
+            vga_print("@");
+            vga_print(my_hostname());
+            vga_setcolor(0x07);
+            vga_putc(':');
+            vga_setcolor(0x0C);
+            vga_print(cwd);
+            vga_setcolor(0x07);
+            vga_print(cur_uid == 0 ? "# " : "$ ");
+            int r = shell_readline(line);
+            if (r == -1) { vga_print("logout\n"); break; }
+            if (r == -2) { vga_print("^C\n"); last_status = 130; continue; }
+            if (!line[0]) continue;
+            hist_add(line);
+            run_line(line);
+            if (exit_flag) break;
+            if (logout_flag) break;
+        }
         if (exit_flag) break;
     }
 }

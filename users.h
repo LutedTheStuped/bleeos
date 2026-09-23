@@ -1,0 +1,16 @@
+/* BleeOS users database: /etc/passwd (name:uid:gid) + /etc/shadow
+ * (name:salt$hash). Passwords are salted/iterated FNV-1a hashes --
+ * hobby-grade, not real password security. ramfs is volatile, so
+ * users added at runtime vanish on reboot. */
+#ifndef USERS_H
+#define USERS_H
+
+void users_init(void);   /* seed root (password "root") if DB missing */
+int  users_auth(const char *name, const char *pass);  /* 1 ok, 0 fail */
+int  users_add(const char *name, const char *pass);   /* 0 ok, -1 error */
+int  users_del(const char *name);       /* 0 ok, -1 (root/missing) */
+int  users_setpass(const char *name, const char *pass);  /* 0 ok, -1 */
+int  users_uid(const char *name);       /* uid, -1 if unknown */
+int  users_validname(const char *name); /* 1 if usable as a login name */
+
+#endif

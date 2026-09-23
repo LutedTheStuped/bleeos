@@ -180,6 +180,11 @@ void sleep_ms(u32 ms) {
 }
 
 /* ================= misc ================= */
+u32 slen(const char *s) { u32 n = 0; while (s[n]) n++; return n; }
+int scmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(u8)*a - (int)(u8)*b;
+}
 char *utoa10(u32 v, char *buf) {
     char t[11];
     int n = 0, k = 0;
