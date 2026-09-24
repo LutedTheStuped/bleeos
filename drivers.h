@@ -80,4 +80,15 @@ char *utoa10(u32 v, char *buf);     /* decimal, NUL-terminated, returns buf */
 u32 slen(const char *s);
 int scmp(const char *a, const char *b);   /* 0 = equal */
 
+/* ---------- serial log (COM1) + dual output ---------- */
+void serial_init(void);               /* 38400 8N1, polled */
+void serial_putc(char c);             /* '\n' -> "\r\n" */
+void serial_print(const char *s);
+void klog(const char *s);             /* VGA screen + serial together */
+
+/* ---------- kernel panic ---------- */
+void panic(const char *msg);          /* red screen + serial, halts */
+void panic_at(const char *file, int line, const char *msg);
+#define ASSERT(c, msg) do { if (!(c)) panic_at(__FILE__, __LINE__, msg); } while (0)
+
 #endif

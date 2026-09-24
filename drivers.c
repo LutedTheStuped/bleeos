@@ -273,3 +273,54 @@ void halt_cpu(void) {
     cli();
     for (;;) hlt();
 }
+
+/* ================= serial log (COM1 0x3F8, polled, 38400 8N1) ================= */
+void serial_init(void) {
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x80);            /* DLAB on */
+    outb(0x3F8 + 0, 0x03);            /* divisor 3 = 38400 */
+    outb(0x3F8 + 1, 0x00);
+    outb(0x3F8 + 3, 0x03);            /* 8N1, DLAB off */
+    outb(0x3F8 + 2, 0xC7);
+    outb(0x3F8 + 4, 0x0B);
+}
+void serial_putc(char c) {
+    if (c == '\n') serial_putc('\r');
+    while (!(inb(0x3F8 + 5) & 0x20)) ;   /* THR empty; 0xFF (no port) passes */
+    outb(0x3F8, (u8)c);
+}
+void serial_print(const char *s) { while (*s) serial_putc(*s++); }
+void klog(const char *s) { vga_print(s); serial_print(s); }
+
+/* ================= kernel panic ================= */
+void panic(const char *msg) {
+    cli();
+    vga_setcolor(0x4F);
+    vga_print("\n*** KERNEL PANIC ***\n");
+    vga_print(msg);
+    vga_putc('\n');
+    serial_print("\n*** KERNEL PANIC ***\n");
+    serial_print(msg);
+    serial_putc('\n');
+    for (;;) hlt();
+}
+void panic_at(const char *file, int line, const char *msg) {
+    char b[12];
+    cli();
+    vga_setcolor(0x4F);
+    vga_print("\n*** KERNEL PANIC ***\nASSERT ");
+    vga_print(file);
+    vga_putc(':');
+    vga_print(utoa10((u32)line, b));
+    vga_print(": ");
+    vga_print(msg);
+    vga_putc('\n');
+    serial_print("\n*** KERNEL PANIC ***\nASSERT ");
+    serial_print(file);
+    serial_putc(':');
+    serial_print(utoa10((u32)line, b));
+    serial_print(": ");
+    serial_print(msg);
+    serial_putc('\n');
+    for (;;) hlt();
+}

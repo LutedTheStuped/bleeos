@@ -60,6 +60,13 @@ BIOS-owned controller is left alone and PS/2 stays the input path.
 Full UHCI enumeration was attempted and dropped (TDs never complete
 on QEMU's UHCI); the stub keeps the door open without the risk.
 
+## Serial log + kernel panic
+COM1 (38400 8N1, polled) mirrors the boot banner via `klog()` (VGA
+screen + serial together); `run-debug` captures it to
+`/tmp/opencode/serial.log`. `panic(msg)` / `ASSERT(c, msg)` print a
+red screen + serial dump and halt (used for impossible driver states,
+e.g. bad ATA sector counts).
+
 ## GUI (`gui` command)
 
 Ly-style login (any password — no user DB yet), then a 640x480x32

@@ -88,7 +88,7 @@ int ata_info(int sel, ata_dev_t *out) {
 
 /* one LBA28 command block; count = 1..255 sectors (0x100 encoding unused) */
 static int ata_setup(int sel, u32 lba, u32 count, u8 cmd) {
-    if (!count || count > 255) return -1;
+    ASSERT(count > 0 && count <= 255, "ata_setup count");
     if (ata_select(sel)) return -1;
     outb(P_COUNT, (u8)count);
     outb(P_LBA0, (u8)lba);

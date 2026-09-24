@@ -6,6 +6,7 @@
 #include "ata.h"
 #include "usb.h"
 #include "uhci.h"
+#include "users.h"
 
 static int has_opt(const char *cmdline, const char *opt) {
     int ol = 0;
@@ -26,11 +27,12 @@ void kernel_main(const boot_info_t *info) {
                   has_opt(info->cmdline, "verbose");
 
     vga_clear();
+    serial_init();
     vga_setcolor(0x0B);
-    vga_print("==============================\n"
-              "  BleeOS 0.3 - 32-bit mode\n"
-              "  boot menu + C kernel shell\n"
-              "==============================\n");
+    klog("==============================\n"
+         "  BleeOS 0.3 - 32-bit mode\n"
+         "  boot menu + C kernel shell\n"
+         "==============================\n");
     vga_setcolor(0x07);
     if (info && info->magic == BOOT_MAGIC) {
         vga_print("cmdline: ");
@@ -49,6 +51,14 @@ void kernel_main(const boot_info_t *info) {
         vga_print("verbose: VGA 80x25, PS/2 poll, PIT/RTC, ramfs mounted on /\n");
     }
     vga_print("Type `help` for commands, `exit` for boot menu.\n");
+    {
+        /* installed = booted from hard disk (BIOS DL 0x80+): the user
+         * DB then persists on reserved HDD sectors across reboots */
+        int installed = info && info->magic == BOOT_MAGIC &&
+                        (info->boot_drive & 0x80);
+        users_set_installed(installed);
+        if (installed) vga_print("installed on HDD: users persist.\n");
+    }
     if (ata_init() == 0) {
         ata_dev_t d;
         char num[16];

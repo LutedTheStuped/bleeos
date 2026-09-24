@@ -23,6 +23,8 @@ all: os.img
 
 boot.bin: boot.asm
 	$(AS) -f bin boot.asm -o boot.bin
+	@od -A n -t x1 -v boot.bin | tr -d ' \n' | grep -q '88163b7d' || \
+		(echo "ERROR: boot_drive moved from 0x7D3B; update bootmenu.c"; exit 1)
 
 kernel_entry.o: kernel_entry.asm
 	$(AS) -f elf32 kernel_entry.asm -o kernel_entry.o
@@ -129,6 +131,22 @@ run-hdd: hdd.img
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
 
+# Bootable ISO (El Torito floppy emulation: the BIOS boots os.img
+# as drive 0, so no guest changes are needed; users stay volatile).
+iso: os.img
+	mkdir -p iso_root
+	cp os.img iso_root/boot.img
+	cp README.md iso_root/README.TXT
+	xorrisofs -o bleeos.iso -V BLEEOS -b boot.img -c boot.cat iso_root/
+	rm -rf iso_root
+	@echo "Built bleeos.iso ($$(stat -c%s bleeos.iso) bytes)"
+
+run-cd: bleeos.iso
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
+		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
+		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-cdrom bleeos.iso -boot order=d,strict=on -net none
+
 # Debug/test VM: HMP monitor + QMP sockets for sendkey, mouse events,
 # screendump/pmemsave. PS/2 kbd+mouse are the default pc devices.
 # NOTE: do NOT use -nographic here: stdio goes to the serial port,
@@ -137,6 +155,7 @@ run-debug: os.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
+		-serial file:/tmp/opencode/serial.log \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 clean:
