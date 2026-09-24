@@ -153,7 +153,9 @@ msg_loading db 'BleeOS boot: loading...', 13, 10, 0
 msg_ok      db 'OK', 13, 10, 0
 msg_error   db 'Disk read error!', 13, 10, 0
 
-boot_drive db 0
+boot_drive db 0   ; ABI: kernel (bootmenu.c) reads BIOS DL from
+                  ; linear 0x7D3B. If this moves, update the address
+                  ; there (the Makefile also fails the build).
 
 ; Disk Address Packet for EDD reads
 dap:

@@ -1050,10 +1050,11 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
 #define INSTALL_SECTORS 161   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
-/* snapshot area: free RAM below the stack. The image contains live
- * .data (cursor position, flags) that our own progress printing
- * mutates, so freeze a copy first and write/verify from that. */
-#define INSTALL_SNAP ((u8 *)0x30000u)
+/* snapshot area: free RAM above the kernel, below the stack.
+ * (Was 0x30000; the kernel's .bss grew past it and the snapshot
+ * trashed cap_active/devs/etc. Guarded below against recurrence.) */
+#define INSTALL_SNAP ((u8 *)0x40000u)
+#define INSTALL_SNAP_END ((u8 *)0x54200u)   /* +161 sectors, worst case */
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
@@ -1085,6 +1086,14 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     sh_print("Writing");
+    {
+        extern char __bss_end;
+        if ((u32)INSTALL_SNAP < (u32)&__bss_end ||
+            (u32)INSTALL_SNAP_END >= 0x90000u) {
+            sh_eprint("install: scratch overlaps kernel/stack; rebuild\n");
+            return 1;
+        }
+    }
     for (u32 i = 0; i < INSTALL_SECTORS * 512; i++)
         INSTALL_SNAP[i] = INSTALL_SRC[i];
     for (u32 s = 0; s < INSTALL_SECTORS;) {

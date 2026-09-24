@@ -120,9 +120,12 @@ static int menu_loop(char cmdlines[2][128]) {
 }
 
 void boot_main(void) {
+    /* BIOS drive number saved by the MBR at a fixed address
+     * (MBR_BOOT_DRIVE in boot.asm, enforced by the Makefile) */
     static boot_info_t info;
     info.magic = BOOT_MAGIC;
     info.boot_sec = rtc_seconds();
+    info.boot_drive = *(volatile u8 *)0x7D3B;
 
     static char cmdlines[2][128];
     for (int e = 0; e < 2; e++) {

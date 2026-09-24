@@ -2,9 +2,106 @@
  * Line-based files, rewritten whole on change; small user counts only. */
 #include "users.h"
 #include "shell.h"
+#include "ata.h"
 
 #define UMAX 16   /* max login name length */
 #define PMAX 32   /* max password length (checked, not stored) */
+
+/* on-disk DB: past the OS image (sectors 0..160), at LBA 256 */
+#define UDISK_LBA 256
+#define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
+static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };
+
+static int persist;   /* 1 when installed on HDD with a usable disk */
+
+void users_set_installed(int on) {
+    ata_dev_t d;
+    persist = 0;
+    if (!on) return;
+    if (ata_info(0, &d)) return;
+    if (d.sectors < UDISK_LBA + UDISK_NSEC) return;
+    persist = 1;
+}
+
+static u32 usum(const u8 *b, u32 n) {
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < n; i++) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
+
+/* write ramfs DB to disk; 0 ok (no-op when not persistent) */
+static int users_save(void) {
+    char pw[768], sh[768];
+    u8 sec[512];
+    int pn, sn, i, s;
+    u32 sum;
+    if (!persist) return 0;
+    pn = shell_fread("/etc/passwd", pw, sizeof(pw));
+    sn = shell_fread("/etc/shadow", sh, sizeof(sh));
+    if (pn < 0 || sn < 0) return -1;
+    sum = usum((u8 *)pw, (u32)pn) ^ usum((u8 *)sh, (u32)sn);
+    for (i = 0; i < 8; i++) sec[i] = (u8)UMAGIC[i];
+    sec[8] = 1; sec[9] = 0; sec[10] = 0; sec[11] = 0;   /* ver */
+    sec[12] = (u8)pn; sec[13] = (u8)(pn >> 8);
+    sec[14] = 0; sec[15] = 0;
+    sec[16] = (u8)sn; sec[17] = (u8)(sn >> 8);
+    sec[18] = 0; sec[19] = 0;
+    sec[20] = (u8)sum; sec[21] = (u8)(sum >> 8);
+    sec[22] = (u8)(sum >> 16); sec[23] = (u8)(sum >> 24);
+    for (i = 24; i < 512; i++) sec[i] = 0;
+    if (ata_write(0, UDISK_LBA, sec, 1)) return -1;
+    for (s = 0; s < 2; s++) {
+        for (i = 0; i < 512; i++)
+            sec[i] = (s * 512 + i < pn) ? (u8)pw[s * 512 + i] : 0;
+        if (ata_write(0, (u32)(UDISK_LBA + 1 + s), sec, 1)) return -1;
+    }
+    for (s = 0; s < 2; s++) {
+        for (i = 0; i < 512; i++)
+            sec[i] = (s * 512 + i < sn) ? (u8)sh[s * 512 + i] : 0;
+        if (ata_write(0, (u32)(UDISK_LBA + 3 + s), sec, 1)) return -1;
+    }
+    return 0;
+}
+
+/* load disk DB into ramfs; 0 ok, -1 none/invalid */
+static int users_load(void) {
+    char pw[768], sh[768];
+    u8 sec[512];
+    int i, pn, sn;
+    u32 sum, want;
+    if (ata_read(0, UDISK_LBA, sec, 1)) return -1;
+    for (i = 0; i < 8; i++)
+        if (sec[i] != (u8)UMAGIC[i]) return -1;
+    if (sec[8] != 1) return -1;
+    pn = sec[12] | (sec[13] << 8);
+    sn = sec[16] | (sec[17] << 8);
+    if (pn < 0 || pn > 768 || sn < 0 || sn > 768) return -1;
+    want = (u32)sec[20] | ((u32)sec[21] << 8) |
+           ((u32)sec[22] << 16) | ((u32)sec[23] << 24);
+    if (ata_read(0, UDISK_LBA + 1, sec, 1)) return -1;
+    for (i = 0; i < 512 && i < pn; i++) pw[i] = (char)sec[i];
+    if (ata_read(0, UDISK_LBA + 2, sec, 1)) return -1;
+    for (i = 0; i + 512 < pn && i < 256; i++) pw[512 + i] = (char)sec[i];
+    pw[pn < 768 ? pn : 767] = 0;
+    if (ata_read(0, UDISK_LBA + 3, sec, 1)) return -1;
+    for (i = 0; i < 512 && i < sn; i++) sh[i] = (char)sec[i];
+    if (ata_read(0, UDISK_LBA + 4, sec, 1)) return -1;
+    for (i = 0; i + 512 < sn && i < 256; i++) sh[512 + i] = (char)sec[i];
+    sh[sn < 768 ? sn : 767] = 0;
+    sum = usum((u8 *)pw, (u32)pn) ^ usum((u8 *)sh, (u32)sn);
+    if (sum != want) return -1;
+    /* sanity: must contain root */
+    {
+        int has = 0;
+        for (i = 0; i + 4 < pn; i++)
+            if (pw[i] == 'r' && pw[i+1] == 'o' && pw[i+2] == 'o' &&
+                pw[i+3] == 't' && pw[i+4] == ':') { has = 1; break; }
+        if (!has) return -1;
+    }
+    shell_fwrite("/etc/passwd", pw, (u32)pn);
+    shell_fwrite("/etc/shadow", sh, (u32)sn);
+    return 0;
+}
 
 /* salted + iterated FNV-1a, hex digest. Deters eyeballing, not attacks. */
 static u32 uhash(const char *salt, const char *pass) {
@@ -99,9 +196,10 @@ static int line_cred(const char *file, int off,
 
 void users_init(void) {
     char buf[768];
+    if (persist && users_load() == 0) return;   /* restored from disk */
     if (shell_fread("/etc/passwd", buf, sizeof(buf)) >= 0 &&
         shell_fread("/etc/shadow", buf, sizeof(buf)) >= 0)
-        return;   /* DB already present (never on fresh boot) */
+        return;
     shell_fwrite("/etc/passwd", "root:0:0\n", 9);
     char salt[5], hash[9], line[64];
     mksalt(salt);
@@ -115,6 +213,7 @@ void users_init(void) {
     line[k++] = '\n';
     line[k] = 0;
     shell_fwrite("/etc/shadow", line, (u32)k);
+    users_save();   /* persist the seed when installed */
 }
 
 int users_auth(const char *name, const char *pass) {
@@ -222,6 +321,7 @@ int users_add(const char *name, const char *pass) {
             return -1;
         }
     }
+    users_save();   /* persist when installed */
     return 0;
 }
 
@@ -249,6 +349,7 @@ int users_del(const char *name) {
             shell_fwrite("/etc/shadow", buf, (u32)m);
         }
     }
+    users_save();   /* persist when installed */
     return 0;
 }
 
@@ -281,5 +382,6 @@ int users_setpass(const char *name, const char *pass) {
             return -1;
         }
     }
+    users_save();   /* persist when installed */
     return 0;
 }

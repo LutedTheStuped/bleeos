@@ -12,5 +12,8 @@ int  users_del(const char *name);       /* 0 ok, -1 (root/missing) */
 int  users_setpass(const char *name, const char *pass);  /* 0 ok, -1 */
 int  users_uid(const char *name);       /* uid, -1 if unknown */
 int  users_validname(const char *name); /* 1 if usable as a login name */
+/* persistence: call at boot; when on and an ATA disk exists, the DB
+ * is loaded from / saved to reserved HDD sectors (survives reboot) */
+void users_set_installed(int on);
 
 #endif
