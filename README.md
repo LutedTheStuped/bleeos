@@ -51,7 +51,18 @@ grade, not real security). Default login is `root` / `root`.
 `logout` returns to the prompt (`#` for root, `$` for users);
 `useradd`/`userdel` (root only), `passwd`, `su`, `users`,
 `whoami` manage the session. The GUI login uses the same DB.
-ramfs is volatile: added users vanish on reboot.
+ramfs is volatile, except on HDD installs (see below): added users
+vanish on reboot when booted from floppy/CD.
+
+## Users persist when installed
+Booting from hard disk (BIOS drive 0x80+) sets installed mode
+(`installed on HDD: users persist.` at boot) and the DB is kept on
+reserved HDD sectors (LBA 256..260, magic + checksums, past the OS
+image): loaded into ramfs at boot, written back on every add/del/
+passwd/seed. Verified: useradd alice on HDD, reboot, alice logs in
+with an identical users list. The install drive is detected from
+the MBR's own boot_drive byte (linear 0x7D3B); the Makefile fails
+the build if that byte moves.
 
 ## USB (`usb` command)
 Stub UHCI detector: PCI-probes the controller and reports per-port
@@ -66,6 +77,13 @@ screen + serial together); `run-debug` captures it to
 `/tmp/opencode/serial.log`. `panic(msg)` / `ASSERT(c, msg)` print a
 red screen + serial dump and halt (used for impossible driver states,
 e.g. bad ATA sector counts).
+
+## ISO (`make iso`, `make run-cd`)
+`bleeos.iso` is built with El Torito floppy emulation (`boot.img` =
+`os.img` plus README.TXT): the BIOS boots it as drive 0, so no
+guest changes are needed and users stay volatile. Tested with
+`run-cd` (`-boot order=d`): boots to the login prompt, root shell
+works.
 
 ## GUI (`gui` command)
 
