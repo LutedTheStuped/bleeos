@@ -4,6 +4,12 @@ LD=ld
 OBJCOPY=objcopy
 QEMU=qemu-system-i386
 
+# Keep the VGA device enabled and prefer SDL for the host window. Fall back
+# to no display only when no graphical session is available.
+# The reason for SDL, is it locks your cursor when you click on the window
+# So its easier to navigate
+DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
+
 # MBR loads this many sectors (must cover the whole stage2 binary)
 STAGE2_SECTORS=160
 
@@ -84,10 +90,10 @@ os.img: boot.bin kernel.bin
 	@echo "Built os.img ($$(stat -c%s os.img) bytes)"
 
 run: os.img
-	$(QEMU) -vga std -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
 
 run-hd: os.img
-	$(QEMU) -vga std -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
@@ -95,7 +101,7 @@ run-nographic: os.img
 # USB bring-up rig: UHCI + USB keyboard/mouse. Enumeration only;
 # PS/2 stays the input path (see `usb` command).
 run-usb: os.img
-	$(QEMU) -accel kvm:tcg -vga std -display none \
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-device piix3-usb-uhci -device usb-kbd -device usb-mouse \
@@ -106,15 +112,19 @@ run-usb: os.img
 hdd.img:
 	qemu-img create -f raw hdd.img 100M
 
+# TODO:	Write proper explanation for why i changed -accel kvm:tcg to -machine accel=kvm:tcg
+# 		Right now im just trying to get the commands working
+#		- Luted
+
 run-install: os.img hdd.img
-	$(QEMU) -accel kvm:tcg -vga std -display none \
+	$(QEMU) -machine accel=kvm:tcg -vga std -display $(DISPLAY_BACKEND) \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on \
 		-drive file=hdd.img,format=raw,if=ide -net none
 
 run-hdd: hdd.img
-	$(QEMU) -accel kvm:tcg -vga std -display none \
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
@@ -124,7 +134,7 @@ run-hdd: hdd.img
 # NOTE: do NOT use -nographic here: stdio goes to the serial port,
 # which BleeOS doesn't drive, so typed keys would never reach the guest.
 run-debug: os.img
-	$(QEMU) -accel kvm:tcg -vga std -display none \
+	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none

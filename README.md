@@ -26,7 +26,8 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
   the LFB, VGA text-mode + font save/restore across sessions).
 - `gfx.h/.c` — software framebuffer (XRGB8888) + built-in 8x8 font.
 - `mouse.h/.c` — PS/2 mouse (polled, bounded waits, init retries).
-- `wm.h/.c` — tiny window manager: overlap, focus, drag, close button.
+- `wm.h/.c` — tiny window manager: overlap, focus, drag, close button,
+  live `wm_resize` (layout changes keep the window on screen).
 - `apps.h/.c` — demo apps: click Counter, live SysInfo (RTC clock).
 
 ## Shell commands
@@ -70,7 +71,10 @@ screen; `Esc` at login returns to the shell.
 Demo apps: **Counter** (click +1), **SysInfo** (live CMOS clock),
 **Calculator** (integer), **Display** settings (640x480, 800x600,
 1024x768 presets plus a Custom editor — type any `W`x`H` within
-320-1920 x 200-1200, `W` a multiple of 8 — applied live). Taskbar shows `user@bleeos` + live clock.
+320-1920 x 200-1200, `W` a multiple of 8 — applied live). The
+`Show all screen types` checkbox swaps the presets for all 24
+supported screen types in a 3-column grid (the window grows to
+fit and is kept on screen by `wm_resize`). Taskbar shows `user@bleeos` + live clock.
 Compositor is double-buffered (1MB shadow buffer, one `rep movsl`
 blit per frame — no tearing) and redraws on input or RTC second
 change, not on a fixed tick.
