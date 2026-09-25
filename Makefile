@@ -17,7 +17,7 @@ CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -no
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
        -Wall -Wextra -O2 -std=gnu11
 
-OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o
+OBJS=kernel_entry.o drivers.o bootmenu.o shell.o kernel.o vbe.o gfx.o mouse.o wm.o apps.o login.o ata.o users.o uhci.o usb.o tui.o
 
 all: os.img
 
@@ -64,6 +64,9 @@ ata.o: ata.c ata.h drivers.h
 
 users.o: users.c users.h shell.h drivers.h
 	$(CC) $(CFLAGS) -c users.c -o users.o
+
+tui.o: tui.c tui.h drivers.h
+	$(CC) $(CFLAGS) -c tui.c -o tui.o
 
 uhci.o: uhci.c uhci.h drivers.h
 	$(CC) $(CFLAGS) -c uhci.c -o uhci.o

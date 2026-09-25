@@ -11,6 +11,11 @@
 #define UDISK_LBA 256
 #define UDISK_NSEC 5   /* header + passwd(2) + shadow(2) */
 static const char UMAGIC[8] = { 'B','L','E','E','U','S','E','R' };
+/* header: magic[8] ver[4] plen[4] slen[4] sum[4] hostname[32]
+ * ver 1: no hostname (sum covers passwd+shadow only)
+ * ver 2: hostname present (sum covers hostname+passwd+shadow) */
+#define UHOST_OFF 24
+#define UHOST_LEN 32
 
 static int persist;   /* 1 when installed on HDD with a usable disk */
 
@@ -30,25 +35,33 @@ static u32 usum(const u8 *b, u32 n) {
 }
 
 /* write ramfs DB to disk; 0 ok (no-op when not persistent) */
-static int users_save(void) {
-    char pw[768], sh[768];
+static int save_now(void) {
+    char pw[768], sh[768], hn[64];
     u8 sec[512];
-    int pn, sn, i, s;
+    int pn, sn, i, s, hnlen;
     u32 sum;
-    if (!persist) return 0;
     pn = shell_fread("/etc/passwd", pw, sizeof(pw));
     sn = shell_fread("/etc/shadow", sh, sizeof(sh));
     if (pn < 0 || sn < 0) return -1;
-    sum = usum((u8 *)pw, (u32)pn) ^ usum((u8 *)sh, (u32)sn);
+    if (shell_fread("/etc/hostname", hn, sizeof(hn)) < 0) {
+        hn[0] = 'b'; hn[1] = 'l'; hn[2] = 'e'; hn[3] = 'e';
+        hn[4] = 'o'; hn[5] = 's'; hn[6] = 0;
+    }
+    hnlen = 0;
+    while (hn[hnlen] && hnlen < UHOST_LEN) hnlen++;
+    sum = usum((u8 *)hn, (u32)hnlen) ^
+          usum((u8 *)pw, (u32)pn) ^ usum((u8 *)sh, (u32)sn);
     for (i = 0; i < 8; i++) sec[i] = (u8)UMAGIC[i];
-    sec[8] = 1; sec[9] = 0; sec[10] = 0; sec[11] = 0;   /* ver */
+    sec[8] = 2; sec[9] = 0; sec[10] = 0; sec[11] = 0;   /* ver */
     sec[12] = (u8)pn; sec[13] = (u8)(pn >> 8);
     sec[14] = 0; sec[15] = 0;
     sec[16] = (u8)sn; sec[17] = (u8)(sn >> 8);
     sec[18] = 0; sec[19] = 0;
     sec[20] = (u8)sum; sec[21] = (u8)(sum >> 8);
     sec[22] = (u8)(sum >> 16); sec[23] = (u8)(sum >> 24);
-    for (i = 24; i < 512; i++) sec[i] = 0;
+    for (i = 0; i < UHOST_LEN; i++)
+        sec[UHOST_OFF + i] = i < hnlen ? (u8)hn[i] : 0;
+    for (i = UHOST_OFF + UHOST_LEN; i < 512; i++) sec[i] = 0;
     if (ata_write(0, UDISK_LBA, sec, 1)) return -1;
     for (s = 0; s < 2; s++) {
         for (i = 0; i < 512; i++)
@@ -63,21 +76,42 @@ static int users_save(void) {
     return 0;
 }
 
+/* session hook: no-op unless installed on HDD */
+static int users_save(void) {
+    if (!persist) return 0;
+    return save_now();
+}
+
+/* installer hook: force the ramfs DB (hostname+users) to disk now */
+int users_flush(void) {
+    ata_dev_t d;
+    if (ata_info(0, &d)) return -1;
+    if (d.sectors < UDISK_LBA + UDISK_NSEC) return -1;
+    return save_now();
+}
+
 /* load disk DB into ramfs; 0 ok, -1 none/invalid */
 static int users_load(void) {
-    char pw[768], sh[768];
+    char pw[768], sh[768], hn[UHOST_LEN + 1];
     u8 sec[512];
-    int i, pn, sn;
+    int i, pn, sn, ver;
     u32 sum, want;
     if (ata_read(0, UDISK_LBA, sec, 1)) return -1;
     for (i = 0; i < 8; i++)
         if (sec[i] != (u8)UMAGIC[i]) return -1;
-    if (sec[8] != 1) return -1;
+    ver = sec[8];
+    if (ver != 1 && ver != 2) return -1;
     pn = sec[12] | (sec[13] << 8);
     sn = sec[16] | (sec[17] << 8);
     if (pn < 0 || pn > 768 || sn < 0 || sn > 768) return -1;
     want = (u32)sec[20] | ((u32)sec[21] << 8) |
            ((u32)sec[22] << 16) | ((u32)sec[23] << 24);
+    if (ver == 2) {
+        for (i = 0; i < UHOST_LEN; i++) hn[i] = (char)sec[UHOST_OFF + i];
+        hn[UHOST_LEN] = 0;
+    } else {
+        hn[0] = 0;
+    }
     if (ata_read(0, UDISK_LBA + 1, sec, 1)) return -1;
     for (i = 0; i < 512 && i < pn; i++) pw[i] = (char)sec[i];
     if (ata_read(0, UDISK_LBA + 2, sec, 1)) return -1;
@@ -89,6 +123,12 @@ static int users_load(void) {
     for (i = 0; i + 512 < sn && i < 256; i++) sh[512 + i] = (char)sec[i];
     sh[sn < 768 ? sn : 767] = 0;
     sum = usum((u8 *)pw, (u32)pn) ^ usum((u8 *)sh, (u32)sn);
+    {
+        int hlen = 0;
+        while (hn[hlen] && hlen < UHOST_LEN) hlen++;
+        if (ver == 2)
+            sum = usum((u8 *)hn, (u32)hlen) ^ sum;
+    }
     if (sum != want) return -1;
     /* sanity: must contain root */
     {
@@ -98,6 +138,7 @@ static int users_load(void) {
                 pw[i+3] == 't' && pw[i+4] == ':') { has = 1; break; }
         if (!has) return -1;
     }
+    if (ver == 2 && hn[0]) shell_fwrite("/etc/hostname", hn, slen(hn));
     shell_fwrite("/etc/passwd", pw, (u32)pn);
     shell_fwrite("/etc/shadow", sh, (u32)sn);
     return 0;

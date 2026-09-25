@@ -9,6 +9,7 @@
 #include "ata.h"
 #include "users.h"
 #include "uhci.h"
+#include "tui.h"
 
 /* ================= string helpers ================= */
 static void scpy(char *d, const char *s) { while ((*d++ = *s++)) ; }
@@ -833,6 +834,7 @@ static int b_useradd(int argc, char **argv, const char *in);
 static int b_userdel(int argc, char **argv, const char *in);
 static int b_users(int argc, char **argv, const char *in);
 static int b_usb(int argc, char **argv, const char *in);
+static int read_new_pass(char *buf, u32 cap);
 static int b_vgaregs(int argc, char **argv, const char *in);
 /* man pages */
 static const char MAN_HELP[] =
@@ -889,11 +891,12 @@ static const char MAN_VGAREGS[] =
     "vgaregs - dump VGA registers\nUsage: vgaregs\n"
     "Prints MISC/SEQ/CRTC/GC/AC/DAC for debugging text mode.\n";
 static const char MAN_INSTALL[] =
-    "install - write BleeOS to hard disk\nUsage: install\n"
-    "TUI wizard for the ATA primary master disk: shows the\n"
-    "drive, asks for YES, writes boot sector + kernel (161\n"
-    "sectors) to LBA 0 and verifies by read-back. Destroys\n"
-    "all data on that disk. Boot it with `-boot order=c`.\n";
+    "install - Debian-like OS installer (TUI)\nUsage: install\n"
+    "Stepped wizard (root only): welcome, hostname, root\n"
+    "password, optional user, disk confirm, progress bar.\n"
+    "Writes boot sector + kernel (161 sectors) to LBA 0 of\n"
+    "the ATA primary master and verifies. Hostname, users\n"
+    "and passwords persist on installed systems.\n";
 static const char MAN_USERS[] =
     "users - login accounts\n"
     "TUI login at boot checks /etc/passwd + /etc/shadow\n"
@@ -1059,7 +1062,10 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
     ata_dev_t d;
-    char num[16];
+    if (shell_uid() != 0) {
+        sh_eprint("install: root only (login as root)\n");
+        return 1;
+    }
     if (ata_info(0, &d)) {
         sh_eprint("install: no ATA primary master disk found\n");
         return 1;
@@ -1073,24 +1079,116 @@ static int b_install(int argc, char **argv, const char *in) {
                   " reboot from floppy and retry\n");
         return 1;
     }
-    sh_print("BleeOS installer\nTarget: ATA primary master ");
-    sh_print(d.model);
-    sh_print(" (");
-    sh_print(sutoa(d.sectors / 2048, num, 10, 0));
-    sh_print(" MB)\nWrites boot sector + kernel (161 sectors) to LBA 0.\n"
-             "ALL DATA ON THE DISK WILL BE DESTROYED.\nType YES to install: ");
-    static char ans[256];
-    int r = shell_readline(ans);
-    if (r < 0 || scmp(ans, "YES") != 0) {
-        sh_print("Aborted.\n");
-        return 1;
+
+    /* 1. welcome */
+    {
+        static const char *items[] = { "Install BleeOS", "Back to shell" };
+        if (tui_menu("BleeOS installer",
+                     "Welcome. This wizard erases a disk and\n"
+                     "installs BleeOS, then sets up hostname,\n"
+                     "passwords and users.", items, 2) != 0) {
+            vga_clear();
+            return 1;
+        }
     }
-    sh_print("Writing");
+    /* 2. hostname */
+    {
+        static char hn[32], cur[64];
+        int r, ok = 0;
+        if (shell_fread("/etc/hostname", cur, sizeof(cur)) < 0) {
+            cur[0] = 'b'; cur[1] = 'l'; cur[2] = 'e'; cur[3] = 'e';
+            cur[4] = 'o'; cur[5] = 's'; cur[6] = 0;
+        }
+        while (!ok) {
+            r = tui_input("Hostname", "Machine name (letters, digits, -):",
+                          cur, hn, sizeof(hn));
+            if (r < 0) { vga_clear(); return 1; }
+            ok = hn[0] != 0;
+            for (int i = 0; hn[i] && ok; i++) {
+                char c = hn[i];
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == '-') || i >= 31)
+                    ok = 0;
+            }
+            if (!ok)
+                tui_msg("Hostname", "Invalid name. Try again (Esc aborts).");
+        }
+        shell_fwrite("/etc/hostname", hn, slen(hn));
+    }
+    /* 3. root password */
+    {
+        static char nw[64];
+        tui_msg("Root password", "Set the root password next.");
+        if (read_new_pass(nw, sizeof(nw)) < 0) { vga_clear(); return 1; }
+        if (users_setpass("root", nw)) {
+            smemset(nw, 0, sizeof(nw));
+            sh_eprint("install: cannot set root password\n");
+            vga_clear();
+            return 1;
+        }
+        smemset(nw, 0, sizeof(nw));
+    }
+    /* 4. optional normal user */
+    {
+        static const char *items[] = { "Yes, create a user", "No, root only" };
+        if (tui_menu("Create user", "Add a non-root account?",
+                     items, 2) == 0) {
+            static char name[32], nw[64];
+            for (;;) {
+                if (tui_input("Create user", "Login name:",
+                              (const char *)0, name,
+                              sizeof(name)) < 0) {
+                    vga_clear();
+                    return 1;
+                }
+                if (!users_validname(name) || users_uid(name) >= 0) {
+                    tui_msg("Create user",
+                            "Invalid or taken. a-z 0-9 _ -, max 16.");
+                    continue;
+                }
+                break;
+            }
+            if (read_new_pass(nw, sizeof(nw)) < 0) { vga_clear(); return 1; }
+            if (users_add(name, nw)) {
+                smemset(nw, 0, sizeof(nw));
+                sh_eprint("install: cannot add user\n");
+                vga_clear();
+                return 1;
+            }
+            smemset(nw, 0, sizeof(nw));
+        }
+    }
+    /* 5. disk confirm */
+    {
+        static char body[160], sz[16];
+        static const char *items[] = {
+            "Erase disk and install", "Go back"
+        };
+        int i = 0;
+        const char *t = "Target: ";
+        while (*t) body[i++] = *t++;
+        for (int k = 0; d.model[k] && i < 100; k++) body[i++] = d.model[k];
+        t = " (";
+        while (*t) body[i++] = *t++;
+        sutoa(d.sectors / 2048, sz, 10, 0);
+        for (int k = 0; sz[k] && i < 120; k++) body[i++] = sz[k];
+        t = " MB)\nALL DATA ON IT WILL BE DESTROYED.";
+        while (*t) body[i++] = *t++;
+        body[i] = 0;
+        if (tui_menu("Target disk", body, items, 2) != 0) {
+            vga_clear();
+            sh_print("Aborted.\n");
+            return 1;
+        }
+    }
+    /* 6. write + verify with progress */
+    tui_progress("Installing", "Writing system...");
     {
         extern char __bss_end;
         if ((u32)INSTALL_SNAP < (u32)&__bss_end ||
             (u32)INSTALL_SNAP_END >= 0x90000u) {
-            sh_eprint("install: scratch overlaps kernel/stack; rebuild\n");
+            tui_msg("Error", "scratch overlaps kernel/stack");
+            vga_clear();
             return 1;
         }
     }
@@ -1100,51 +1198,51 @@ static int b_install(int argc, char **argv, const char *in) {
         u32 n = INSTALL_SECTORS - s;
         if (n > 32) n = 32;
         if (ata_write(0, s, INSTALL_SNAP + s * 512, n)) {
-            sh_print(" FAILED at sector ");
-            sh_print(sutoa(s, num, 10, 0));
-            sh_putc('\n');
+            tui_msg("Error", "write failed; disk may be bad");
+            vga_clear();
             return 1;
         }
         s += n;
-        sh_putc('.');
+        tui_progress_update((int)(s * 70 / INSTALL_SECTORS));
     }
-    sh_print(" verifying");
-    /* sector-by-sector with a STACK buffer: any static buffer would
-     * live in .bss, i.e. inside the source image, and clobber it */
-    u8 sec[512];
-    for (u32 s = 0; s < INSTALL_SECTORS; s++) {
-        if (ata_read(0, s, sec, 1)) {
-            sh_print(" READ FAILED at sector ");
-            sh_print(sutoa(s, num, 10, 0));
-            sh_putc('\n');
-            return 1;
+    tui_progress("Installing", "Verifying...");
+    {
+        u8 sec[512];
+        for (u32 s = 0; s < INSTALL_SECTORS; s++) {
+            if (ata_read(0, s, sec, 1)) {
+                tui_msg("Error", "read-back failed");
+                vga_clear();
+                return 1;
+            }
+            for (u32 i = 0; i < 512; i++) {
+                if (sec[i] != INSTALL_SNAP[s * 512 + i]) {
+                    tui_msg("Error", "verify mismatch");
+                    vga_clear();
+                    return 1;
+                }
+            }
+            tui_progress_update(70 + (int)(s * 30 / INSTALL_SECTORS));
         }
-        u32 bad = 512;
-        for (u32 i = 0; i < 512; i++) {
-            if (sec[i] != INSTALL_SNAP[s * 512 + i]) { bad = i; break; }
-        }
-        if (bad < 512) {
-            const u8 *sp = INSTALL_SNAP + s * 512;
-            u32 ssum = 0, dsum = 0;
-            for (u32 i = 0; i < 512; i++) { ssum += sp[i]; dsum += sec[i]; }
-            sh_print(" MISMATCH at sector ");
-            sh_print(sutoa(s, num, 10, 0));
-            sh_print(" off=");
-            sh_print(sutoa(bad, num, 10, 0));
-            sh_print(" src=");
-            sh_print(sutoa(sp[bad], num, 16, 0));
-            sh_print(" disk=");
-            sh_print(sutoa(sec[bad], num, 16, 0));
-            sh_print(" srcsum=");
-            sh_print(sutoa(ssum, num, 16, 0));
-            sh_print(" disksum=");
-            sh_print(sutoa(dsum, num, 16, 0));
-            sh_putc('\n');
-            return 1;
-        }
-        if ((s & 7) == 7) sh_putc('.');
     }
-    sh_print("\nInstalled. Boot the disk (`-boot order=c`, no floppy).\n");
+    /* persist hostname+users collected above (live media: the
+     * session hooks are no-ops, so flush explicitly) */
+    if (users_flush()) {
+        tui_msg("Error", "system is on the disk but user\n"
+                "settings were NOT saved");
+        vga_clear();
+        return 1;
+    }
+    /* 7. done */
+    {
+        static const char *items[] = { "Reboot now", "Back to shell" };
+        tui_msg("Installation complete",
+                "BleeOS is on the disk. Boot it without\n"
+                "the floppy (`-boot order=c`).");
+        if (tui_menu("Finished", "Reboot into the new system?",
+                     items, 2) == 0)
+            reboot();
+        vga_clear();
+    }
     return 0;
 }
 

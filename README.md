@@ -38,11 +38,13 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 
 ## Hard disk (`install` command)
 ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
-detected primary master at boot; `install` is a TUI wizard that
-confirms with YES, writes the boot sector + kernel (161 sectors,
-snapshotted from RAM) to LBA 0, and verifies by read-back.
-Tested end-to-end: `make run-install` (floppy + blank `hdd.img`),
-`install`, then `make run-hdd` boots BleeOS from the hard disk.
+detected primary master at boot; `install` is a Debian-like TUI
+wizard (root only): welcome, hostname, root password, optional
+user, disk confirm, progress bar, reboot. It writes boot sector +
+kernel (161 sectors) to LBA 0, verifies, then flushes hostname +
+users to the user DB so the installed system boots with them.
+Tested end-to-end (screenshots): full wizard, `make run-hdd`,
+login as the wizard-created user.
 
 ## Users (TUI login + database)
 Boot drops to a `hostname login:` prompt checked against
