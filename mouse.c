@@ -43,9 +43,15 @@ static int n;
 
 int mouse_init(void) {
     /* retry: PS/2 timeouts can fire spuriously under host load */
-    for (int attempt = 0; attempt < 3; attempt++) {
-        if (mouse_tryinit() == 0) return 0;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        if (mouse_tryinit() == 0) {
+            klogf(KLOG_INFO, "ps/2: mouse ready (3-byte packets, 60 Hz, attempt %d)",
+                  attempt);
+            return 0;
+        }
+        klogf(KLOG_DEBUG, "ps/2: mouse init attempt %d failed", attempt);
     }
+    klogf(KLOG_WARN, "ps/2: no mouse after 3 attempts");
     return -1;
 }
 

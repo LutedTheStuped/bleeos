@@ -9,7 +9,8 @@
 typedef struct {
     u32 magic;          /* BOOT_MAGIC */
     u32 selected;       /* menu entry index chosen */
-    char cmdline[128];  /* kernel command line, e.g. "root=/ram0 verbose" */
+    char cmdline[128];  /* kernel command line, e.g.
+                         * "root=/ram0 verbose klog=vga" */
     u32 boot_sec;       /* RTC seconds at menu start (for uptime) */
     u8 boot_drive;      /* BIOS DL: 0x00 floppy, 0x80+ hard disk */
     u8 _pad[3];

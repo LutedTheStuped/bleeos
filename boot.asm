@@ -1,5 +1,5 @@
 ; BleeOS Stage 1 (MBR) - loads stage 2 (menu + kernel) to 0x7E00, then jumps.
-; Path 1 (preferred, hard disk): EDD LBA reads (AH=0x42), 4 x 32-sector
+; Path 1 (preferred, hard disk): EDD LBA reads (AH=0x42), 6 x 32-sector
 ;   chunks, each inside one segment (no 64K crossings). Fast, geometry-free.
 ; Path 2 (fallback, e.g. real floppy): CHS loop via int 0x13 AH=0x02,
 ;   1 sector/call (track-safe), reset+retry on errors.
@@ -7,7 +7,7 @@
 [BITS 16]
 [ORG 0x7C00]
 
-STAGE2_SECTORS equ 160
+STAGE2_SECTORS equ 192
 STAGE2_LBA     equ 1
 CHUNK_SECTORS  equ 32              ; 16KB per EDD call, segment-contained
 
@@ -36,7 +36,7 @@ start:
     test cx, 1                      ; bit 0 = LBA packet support
     jz use_chs
 
-    ; --- EDD path: 4 chunks of 32 sectors ---
+    ; --- EDD path: 6 chunks of 32 sectors ---
     mov byte [lba_hi], 0
     mov word [lba_lo], STAGE2_LBA
     mov cx, STAGE2_SECTORS / CHUNK_SECTORS

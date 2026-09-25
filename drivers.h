@@ -80,11 +80,27 @@ char *utoa10(u32 v, char *buf);     /* decimal, NUL-terminated, returns buf */
 u32 slen(const char *s);
 int scmp(const char *a, const char *b);   /* 0 = equal */
 
-/* ---------- serial log (COM1) + dual output ---------- */
+/* ---------- serial port (COM1) ---------- */
 void serial_init(void);               /* 38400 8N1, polled */
 void serial_putc(char c);             /* '\n' -> "\r\n" */
 void serial_print(const char *s);
-void klog(const char *s);             /* VGA screen + serial together */
+
+/* ---------- kernel log ----------
+ * klogf() writes one timestamped line to COM1; the VGA text screen only
+ * sees it when the boot arg `klog=vga` (alias `console=vga`) turned the
+ * mirror on, so the log never fights the menu/shell for the screen.
+ * Line shape:  [   0.123] INFO  message
+ * `verbose` raises the filter from KLOG_INFO to KLOG_DEBUG. */
+enum { KLOG_DEBUG = 0, KLOG_INFO = 1, KLOG_WARN = 2, KLOG_ERROR = 3 };
+void klog_init(void);                 /* serial_init + time base (idempotent) */
+void klog_level(int level);           /* minimum level emitted (default INFO) */
+int  klog_getlevel(void);
+void klog_mirror(int on);             /* also copy log lines to the VGA screen */
+int  klog_mirrored(void);
+u32  klog_uptime_sec(void);           /* seconds since klog_init() */
+u32  klog_uptime_msec(void);          /* ms inside the current second (0..999) */
+void klogf(int level, const char *fmt, ...);   /* ... = %s %c %d %u %x %X %p %% */
+void klog(const char *s);             /* banner text: VGA screen + serial together */
 
 /* ---------- kernel panic ---------- */
 void panic(const char *msg);          /* red screen + serial, halts */

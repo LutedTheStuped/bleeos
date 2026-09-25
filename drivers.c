@@ -1,6 +1,9 @@
 /* BleeOS drivers implementation. */
 #include "drivers.h"
 
+static u16 pit_count(void);         /* PIT channel-0 latch (lazily declared) */
+static void pit_advance(u16 cur);   /* log-clock tick, fed by every wait loop */
+
 /* ================= VGA ================= */
 #define VGA_BUF ((volatile u16*)0xB8000)
 
@@ -96,6 +99,7 @@ static int shift_on, caps_on, ctrl_on;
 
 int kbd_trykey(void) {
     static int ext = 0;
+    pit_advance(pit_count());       /* the prompt spin also drives the log clock */
     u8 st = inb(0x64);
     if (!(st & 0x01)) return -1;
     if (st & 0x20) return -1;   /* AUX (mouse) byte: leave it */
@@ -168,6 +172,11 @@ static u16 pit_count(void) {
     return (u16)lo | ((u16)hi << 8);
 }
 
+/* log clock: the kernel never sleeps in an idle loop, so every place that
+ * waits (PIT busy-wait, keyboard spin) feeds the 16-bit counter deltas into
+ * the uptime kept for the log timestamps (see the kernel-log section) */
+static void pit_advance(u16 cur);
+
 void sleep_ms(u32 ms) {
     u32 need = ms * 1193;           /* 1193182 ticks/sec */
     u32 acc = 0;
@@ -176,6 +185,7 @@ void sleep_ms(u32 ms) {
         u16 cur = pit_count();
         acc += (u16)(prev - cur);   /* handles 16-bit wrap */
         prev = cur;
+        pit_advance(cur);           /* keep the log clock moving while waiting */
     }
 }
 
@@ -258,6 +268,7 @@ void rtc_format(char *out) {
 
 /* ================= machine control ================= */
 void reboot(void) {
+    klogf(KLOG_WARN, "machine: reboot (8042 reset, PCI reset, triple fault)");
     u8 good = 0x02;
     while (good & 0x02) good = inb(0x64);   /* drain input buffer */
     outb(0x64, 0xFE);                        /* 8042 reset */
@@ -270,11 +281,12 @@ void reboot(void) {
 }
 
 void halt_cpu(void) {
+    klogf(KLOG_WARN, "machine: CPU halted (interrupts off)");
     cli();
     for (;;) hlt();
 }
 
-/* ================= serial log (COM1 0x3F8, polled, 38400 8N1) ================= */
+/* ================= serial port (COM1 0x3F8, polled, 38400 8N1) ================= */
 void serial_init(void) {
     outb(0x3F8 + 1, 0x00);
     outb(0x3F8 + 3, 0x80);            /* DLAB on */
@@ -291,6 +303,170 @@ void serial_putc(char c) {
 }
 void serial_print(const char *s) { while (*s) serial_putc(*s++); }
 void klog(const char *s) { vga_print(s); serial_print(s); }
+
+/* ================= kernel log (COM1 + optional VGA mirror) ================= */
+#define KLOG_MAX   256            /* assembled line (incl. NUL/newline) */
+#define KLOG_TICKS 1193182u       /* PIT input frequency */
+
+static struct {
+    u8 inited;                    /* serial is up, time base is running */
+    u8 mirror;                    /* boot arg: copy log lines to VGA text */
+    u8 level;                     /* lowest level that gets emitted */
+    u8 tvalid;                    /* first PIT sample taken */
+    u16 prev;                     /* previous PIT channel-0 count */
+    u32 sec;                      /* uptime seconds since klog_init() */
+    u32 frac;                     /* PIT ticks inside the current second */
+} lg;
+
+static const char *const lg_tag[4] = { "DEBUG", "INFO ", "WARN ", "ERROR" };
+static const u8 lg_col[4]         = { 0x08,   0x07,   0x0E,   0x0C  };
+
+/* Channel 0 wraps every ~55 ms, so it must be sampled at least that often
+ * or whole wraps are lost: sleep_ms() and the keyboard spin hand their
+ * samples in here, klogf() takes one itself. Deltas are unsigned subtractions,
+ * so the 16-bit wrap cancels out. */
+static void pit_advance(u16 cur) {
+    if (!lg.tvalid) { lg.prev = cur; lg.tvalid = 1; return; }
+    lg.frac += (u16)(lg.prev - cur);
+    lg.prev = cur;
+    while (lg.frac >= KLOG_TICKS) { lg.frac -= KLOG_TICKS; lg.sec++; }
+}
+
+/* ---- line assembly: everything is appended to kline, then emitted ---- */
+static char kline[KLOG_MAX];
+static u32  klen;
+
+static void kput(char c) {
+    if (klen < KLOG_MAX - 1) kline[klen] = c;
+    klen++;
+}
+static void kputs(const char *s) { while (*s) kput(*s++); }
+
+/* digits of v in base (10 or 16), written reversed into t, count back */
+static u32 kdigits(char *t, u32 v, u32 base, int upper) {
+    const char *d = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    u32 k = 0;
+    if (!v) t[k++] = '0';
+    while (v) { t[k++] = d[v % base]; v /= base; }
+    return k;
+}
+
+/* reversed digits + front padding, emitted right-aligned in `width` */
+static void knum(u32 v, u32 base, int upper, u32 width, char pad) {
+    char t[12];
+    u32 k = kdigits(t, v, base, upper);
+    while (k < width && k < sizeof(t)) t[k++] = pad;
+    while (k) kput(t[--k]);
+}
+
+static void kvformat(const char *fmt, __builtin_va_list ap) {
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') { kput(*p); continue; }
+        if (*++p == 0) break;
+        if (*p == '%') { kput('%'); continue; }
+        int left = 0;
+        if (*p == '-') { left = 1; p++; if (!*p) break; }
+        char pad = ' ';
+        if (*p == '0') { pad = '0'; p++; if (!*p) break; }
+        u32 width = 0;
+        while (*p >= '0' && *p <= '9') { width = width * 10 + (u32)(*p - '0'); p++; }
+        switch (*p) {
+        case 's': {
+            const char *s = __builtin_va_arg(ap, const char *);
+            if (!s) s = "(null)";
+            u32 n = 0;
+            while (s[n]) n++;
+            if (!left) for (u32 i = n; i < width; i++) kput(' ');
+            kputs(s);
+            if (left) for (u32 i = n; i < width; i++) kput(' ');
+            break;
+        }
+        case 'c':
+            kput((char)__builtin_va_arg(ap, int));
+            break;
+        case 'd': case 'i': {
+            int v = __builtin_va_arg(ap, int);
+            if (v < 0) { kput('-'); knum((u32)(-(long)v), 10, 0, width ? width - 1 : 0, pad); }
+            else knum((u32)v, 10, 0, width, pad);
+            break;
+        }
+        case 'u':
+            knum(__builtin_va_arg(ap, u32), 10, 0, width, pad);
+            break;
+        case 'x':
+            knum(__builtin_va_arg(ap, u32), 16, 0, width, pad);
+            break;
+        case 'X':
+            knum(__builtin_va_arg(ap, u32), 16, 1, width, pad);
+            break;
+        case 'p':
+            kputs("0x");
+            knum((u32)__builtin_va_arg(ap, void *), 16, 0, 8, '0');
+            break;
+        default:                    /* unknown conversion: print it raw */
+            kput('%');
+            kput(*p);
+            break;
+        }
+    }
+}
+
+void klogf(int level, const char *fmt, ...) {
+    if (!lg.inited || level < lg.level || level > KLOG_ERROR) return;
+
+    klen = 0;
+    /* [   0.123] TAG message\n */
+    pit_advance(pit_count());
+    kput('[');
+    knum(lg.sec, 10, 0, 5, ' ');
+    kput('.');
+    knum(lg.frac * 1000u / KLOG_TICKS, 10, 0, 3, '0');
+    kputs("] ");
+    kputs(lg_tag[level & 3]);
+    kput(' ');
+    {
+        __builtin_va_list ap;
+        __builtin_va_start(ap, fmt);
+        kvformat(fmt, ap);
+        __builtin_va_end(ap);
+    }
+    if (klen > KLOG_MAX - 2) klen = KLOG_MAX - 2;   /* room for the newline */
+    if (!klen || kline[klen - 1] != '\n') kline[klen++] = '\n';
+
+    /* serial always; the VGA text screen only when the boot arg asked */
+    u8 saved = 0;
+    if (lg.mirror) { saved = vga_getcolor(); vga_setcolor(lg_col[level & 3]); }
+    for (u32 i = 0; i < klen; i++) {
+        serial_putc(kline[i]);
+        if (lg.mirror) vga_putc(kline[i]);
+    }
+    if (lg.mirror) vga_setcolor(saved);
+}
+
+void klog_init(void) {
+    if (lg.inited) return;
+    serial_init();
+    lg.level = KLOG_INFO;
+    lg.sec = 0;
+    lg.frac = 0;
+    lg.prev = pit_count();
+    lg.tvalid = 1;
+    lg.inited = 1;
+    klogf(KLOG_INFO, "log: kernel log on COM1 0x3F8 (38400 8N1, polled), "
+                     "uptime base started");
+}
+
+void klog_level(int level) {
+    if (level < KLOG_DEBUG) level = KLOG_DEBUG;
+    if (level > KLOG_ERROR) level = KLOG_ERROR;
+    lg.level = (u8)level;
+}
+int klog_getlevel(void) { return lg.level; }
+void klog_mirror(int on) { lg.mirror = on ? 1 : 0; }
+int  klog_mirrored(void) { return lg.mirror; }
+u32  klog_uptime_sec(void) { return lg.sec; }
+u32  klog_uptime_msec(void) { return lg.frac * 1000u / KLOG_TICKS; }
+
 
 /* ================= kernel panic ================= */
 void panic(const char *msg) {

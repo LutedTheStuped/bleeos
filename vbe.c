@@ -142,10 +142,19 @@ int vbe_available(void) {
 }
 
 int vbe_set(int w, int h, int bpp) {
-    if (!vbe_available()) return -1;
-    if (bpp != 32) return -1;   /* XRGB8888 only for now */
+    if (!vbe_available()) {
+        klogf(KLOG_WARN, "vbe: Bochs VBE interface missing at 0x1CE");
+        return -1;
+    }
+    if (bpp != 32) {   /* XRGB8888 only for now */
+        klogf(KLOG_WARN, "vbe: %d bpp not supported (32 only)", bpp);
+        return -1;
+    }
     u32 lfb = find_lfb();
-    if (!lfb) lfb = 0xE0000000u;    /* QEMU/Bochs default */
+    if (!lfb) {
+        lfb = 0xE0000000u;    /* QEMU/Bochs default */
+        klogf(KLOG_DEBUG, "vbe: no PCI BAR0 for the LFB, using 0xE0000000");
+    }
     /* save the text font only from text mode; in graphics mode the
      * planes hold LFB pixels, not a font */
     static int font_valid = 0;
@@ -156,6 +165,8 @@ int vbe_set(int w, int h, int bpp) {
     vbe_write(VBE_BPP, (u16)bpp);
     vbe_write(VBE_ENABLE, VBE_EN_ENABLE | VBE_EN_LFB | VBE_EN_NOCLEAR);
     cur_w = w; cur_h = h; cur_bpp = bpp; cur_lfb = lfb;
+    klogf(KLOG_INFO, "vbe: graphics mode %dx%dx%d on, LFB 0x%08X (font saved)",
+          w, h, bpp, lfb);
     return 0;
 }
 
@@ -167,6 +178,7 @@ void vbe_disable(void) {
     vga_mode3();                /* reprogram text mode explicitly */
     font_load();                /* restore wiped font */
     cur_w = cur_h = cur_bpp = 0;
+    klogf(KLOG_INFO, "vbe: disabled, VGA text mode 3 restored (font reloaded)");
 }
 
 u32 vbe_lfb(void) { return cur_lfb; }

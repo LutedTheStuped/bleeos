@@ -7,7 +7,7 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
 ## Layout
 
 - `boot.asm` — 512-byte MBR. EDD LBA reads (`AH=0x42`, 32-sector chunks)
-  with CHS fallback (1 sector/call, reset+retry); loads 96 sectors
+  with CHS fallback (1 sector/call, reset+retry); loads 192 sectors
   (stage 2) to `0x7E00`, then jumps there.
 - `kernel_entry.asm` — real→protected trampoline + flat GDT, linked at `0x7E00`.
   Calls `boot_main()`.
@@ -16,8 +16,9 @@ Boot flow: `boot.asm` (16-bit ASM MBR) → `kernel_entry.asm` (ASM: A20, GDT,
   command line per entry. Passes `boot_info_t` (magic, entry, cmdline,
   boot time) to the kernel. Shell `exit` returns to the menu.
 - `drivers.h/.c` — VGA text, PS/2 keyboard (incl. arrows), PIT sleep,
-  CMOS RTC, reboot/halt. Shared by menu and kernel.
-- `kernel.c` — banner, `verbose` cmdline parsing, runs the shell.
+  CMOS RTC, reboot/halt, plus the kernel log (`klogf`, COM1 + optional
+  VGA mirror). Shared by menu and kernel.
+- `kernel.c` — banner, boot-arg parsing (`verbose`, `klog=vga`), runs the shell.
 - `shell.c/.h` — POSIX-style shell: ramfs (`/motd`, `/version`, `/etc/hostname`),
   env vars, history (Up/Down), line editing, quoting, `$VAR $? $$`,
   `; && ||` lists, `> >> <` redirection, exit statuses, Ctrl+C/D.
@@ -41,7 +42,7 @@ ATA PIO driver (primary bus, LBA28, polled). The kernel reports a
 detected primary master at boot; `install` is a Debian-like TUI
 wizard (root only): welcome, hostname, root password, optional
 user, disk confirm, progress bar, reboot. It writes boot sector +
-kernel (161 sectors) to LBA 0, verifies, then flushes hostname +
+kernel (193 sectors) to LBA 0, verifies, then flushes hostname +
 users to the user DB so the installed system boots with them.
 Tested end-to-end (screenshots): full wizard, `make run-hdd`,
 login as the wizard-created user.
@@ -73,12 +74,39 @@ BIOS-owned controller is left alone and PS/2 stays the input path.
 Full UHCI enumeration was attempted and dropped (TDs never complete
 on QEMU's UHCI); the stub keeps the door open without the risk.
 
-## Serial log + kernel panic
-COM1 (38400 8N1, polled) mirrors the boot banner via `klog()` (VGA
-screen + serial together); `run-debug` captures it to
-`/tmp/opencode/serial.log`. `panic(msg)` / `ASSERT(c, msg)` print a
-red screen + serial dump and halt (used for impossible driver states,
-e.g. bad ATA sector counts).
+## Kernel log (COM1) + boot args
+
+Boot, driver and shell events go through `klogf(level, fmt, ...)`
+(`drivers.c`): one timestamped, levelled line per event, always written
+to COM1 (38400 8N1, polled) — the VGA screen only sees it when a boot
+arg asks for it. Covered: boot manager, kernel entry, console setup,
+ATA probe/transfers, UHCI scan, PS/2 mouse, VBE mode switches, user DB,
+ramfs, login and every shell command:
+
+```
+[    5.453] INFO  ata: probing the primary bus (0x1F0), LBA28 PIO, polled
+[    5.461] DEBUG ata: master: no device
+[    5.624] WARN  ata: primary bus is empty (`install` will not run)
+[   14.292] DEBUG sh: run: ls
+```
+
+Levels are `DEBUG`, `INFO`, `WARN`, `ERROR` (default filter `INFO`).
+Boot args are set per entry with `E` in the boot menu:
+
+- `verbose` — drop the filter to `DEBUG` (per-command, per-device tracing).
+- `klog=vga` (alias `console=vga`) — mirror the serial log onto the VGA
+  text screen as well, colored per level (DEBUG grey, INFO white, WARN
+  yellow, ERROR red). Without it the screen stays clean for the menu
+  and the shell.
+
+Timestamps come from the PIT: `klog_init()` starts the uptime base at
+the boot menu, and every wait loop (`sleep_ms`, the keyboard spin at
+the prompt) feeds it counter samples, so the clock is still correct
+after minutes of idling at `login:`. `run-debug` captures COM1 to
+`/tmp/opencode/serial.log`.
+
+`panic(msg)` / `ASSERT(c, msg)` print a red screen + serial dump and
+halt (used for impossible driver states, e.g. bad ATA sector counts).
 
 ## ISO (`make iso`, `make run-cd`)
 `bleeos.iso` is built with El Torito floppy emulation (`boot.img` =

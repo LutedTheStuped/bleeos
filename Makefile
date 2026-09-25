@@ -11,7 +11,7 @@ QEMU=qemu-system-i386
 DISPLAY_BACKEND ?= $(if $(or $(DISPLAY),$(WAYLAND_DISPLAY)),sdl,none)
 
 # MBR loads this many sectors (must cover the whole stage2 binary)
-STAGE2_SECTORS=160
+STAGE2_SECTORS=192
 
 CFLAGS=-m32 -march=i386 -mno-mmx -mno-sse -mno-sse2 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
        -fno-builtin -fno-stack-protector -fno-pie -no-pie \
@@ -95,10 +95,10 @@ os.img: boot.bin kernel.bin
 	@echo "Built os.img ($$(stat -c%s os.img) bytes)"
 
 run: os.img
-	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -serial stdio
 
 run-hd: os.img
-	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none
+	$(QEMU) -vga std -display $(DISPLAY_BACKEND) -drive file=os.img,format=raw,if=ide -boot order=c,strict=on -net none -serial stdio
 
 run-nographic: os.img
 	$(QEMU) -drive file=os.img,format=raw,if=floppy -boot order=a,strict=on -net none -nographic
@@ -126,13 +126,15 @@ run-install: os.img hdd.img
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
 		-drive file=os.img,format=raw,if=floppy -boot order=a,strict=on \
-		-drive file=hdd.img,format=raw,if=ide -net none
+		-drive file=hdd.img,format=raw,if=ide -net none \
+		-serial stdio
 
 run-hdd: hdd.img
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
-		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none
+		-drive file=hdd.img,format=raw,if=ide -boot order=c,strict=on -net none \
+		-serial stdio
 
 # Bootable ISO (El Torito floppy emulation: the BIOS boots os.img
 # as drive 0, so no guest changes are needed; users stay volatile).
@@ -148,7 +150,8 @@ run-cd: bleeos.iso
 	$(QEMU) -machine accel=kvm:tcg -vga std -display none \
 		-monitor unix:/tmp/opencode/qemu-mon,server,nowait \
 		-qmp unix:/tmp/opencode/qmp.sock,server,nowait \
-		-cdrom bleeos.iso -boot order=d,strict=on -net none
+		-cdrom bleeos.iso -boot order=d,strict=on -net none \
+		-serial stdio
 
 # Debug/test VM: HMP monitor + QMP sockets for sendkey, mouse events,
 # screendump/pmemsave. PS/2 kbd+mouse are the default pc devices.

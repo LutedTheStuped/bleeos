@@ -20,6 +20,7 @@ int uhci_nports(void) { return present ? 2 : 0; }
 int uhci_init(void) {
     if (present) return 0;
     /* PCI: class 0x0C03, prog-if 0x00 = UHCI */
+    klogf(KLOG_DEBUG, "usb: scanning PCI slots 0..31 for a UHCI controller");
     for (int slot = 0; slot < 32; slot++) {
         u32 id = pci_cfg((u8)slot, 0);
         if (id == 0xFFFFFFFFu || id == 0) continue;
@@ -30,8 +31,12 @@ int uhci_init(void) {
         iobase = (u16)(bar & ~0x1Fu);
         if (!iobase) continue;
         present = 1;
+        klogf(KLOG_INFO, "usb: UHCI controller in slot %d (id 0x%08X), I/O base 0x%04X",
+              slot, id, iobase);
         break;
     }
+    if (!present)
+        klogf(KLOG_DEBUG, "usb: no UHCI controller (PS/2 stays the input path)");
     return present ? 0 : -1;
 }
 

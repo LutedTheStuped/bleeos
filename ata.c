@@ -46,6 +46,7 @@ static int ata_select(int sel) {
 
 static ata_dev_t devs[2];
 static int probed;
+static int ndev;    /* devices found by the (single) probe */
 
 static int ata_identify(int sel, ata_dev_t *d) {
     u16 buf[256];
@@ -73,9 +74,22 @@ static int ata_identify(int sel, ata_dev_t *d) {
 
 int ata_init(void) {
     int n = 0;
-    for (int s = 0; s < 2; s++)
-        if (ata_identify(s, &devs[s]) == 0) n++;
+    if (probed) return ndev ? 0 : -1;    /* already probed: keep the log single */
+    klogf(KLOG_INFO, "ata: probing the primary bus (0x1F0), LBA28 PIO, polled");
+    for (int s = 0; s < 2; s++) {
+        if (ata_identify(s, &devs[s]) == 0) {
+            n++;
+            klogf(KLOG_INFO, "ata: %s: \"%s\", %u sectors (%u MB)",
+                  s ? "slave " : "master", devs[s].model,
+                  devs[s].sectors, devs[s].sectors / 2048);
+        } else {
+            klogf(KLOG_DEBUG, "ata: %s: no device", s ? "slave " : "master");
+        }
+    }
     probed = 1;
+    ndev = n;
+    if (n) klogf(KLOG_INFO, "ata: %d device(s) ready on the primary bus", n);
+    else   klogf(KLOG_WARN, "ata: primary bus is empty (`install` will not run)");
     return n ? 0 : -1;
 }
 
@@ -103,13 +117,23 @@ static int ata_setup(int sel, u32 lba, u32 count, u8 cmd) {
 int ata_read(int sel, u32 lba, u8 *buf, u32 count) {
     if (!probed) ata_init();
     if (sel < 0 || sel > 1 || !devs[sel].present) return -1;
-    if (ata_setup(sel, lba, count, 0x20)) return -1;   /* READ SECTORS */
+    if (ata_setup(sel, lba, count, 0x20)) {         /* READ SECTORS */
+        klogf(KLOG_ERROR, "ata: READ setup failed (drive %d lba %u count %u)",
+              sel, lba, count);
+        return -1;
+    }
     for (u32 s = 0; s < count; s++) {
-        if (ata_wait(1)) return -1;
+        if (ata_wait(1)) {
+            klogf(KLOG_ERROR, "ata: READ timeout (drive %d lba %u + %u of %u)",
+                  sel, lba, s, count);
+            return -1;
+        }
         ata_delay();
         u16 *w = (u16 *)(buf + s * 512);
         for (int i = 0; i < 256; i++) w[i] = inw(P_DATA);
     }
+    klogf(KLOG_DEBUG, "ata: read %u sector(s) at lba %u (drive %d)",
+          count, lba, sel);
     return 0;
 }
 
@@ -123,13 +147,31 @@ int ata_write(int sel, u32 lba, const u8 *buf, u32 count) {
      * but each needs a !BSY wait after its words before the next
      * command may be issued. */
     for (u32 s = 0; s < count; s++) {
-        if (ata_setup(sel, lba + s, 1, 0x30)) return -1; /* WRITE SECTORS */
-        if (ata_wait(1)) return -1;
+        if (ata_setup(sel, lba + s, 1, 0x30)) {        /* WRITE SECTORS */
+            klogf(KLOG_ERROR, "ata: WRITE setup failed (drive %d lba %u)",
+                  sel, lba + s);
+            return -1;
+        }
+        if (ata_wait(1)) {
+            klogf(KLOG_ERROR, "ata: WRITE timeout (drive %d lba %u)",
+                  sel, lba + s);
+            return -1;
+        }
         ata_delay();
         const u16 *w = (const u16 *)(buf + s * 512);
         for (int i = 0; i < 256; i++) outw(P_DATA, w[i]);
-        if (ata_wait(0)) return -1;   /* sector done before next cmd */
+        if (ata_wait(0)) {   /* sector done before next cmd */
+            klogf(KLOG_ERROR, "ata: WRITE not idle (drive %d lba %u)",
+                  sel, lba + s);
+            return -1;
+        }
     }
     outb(P_CMD, 0xE7);                  /* CACHE FLUSH */
-    return ata_wait(0);
+    if (ata_wait(0)) {
+        klogf(KLOG_ERROR, "ata: CACHE FLUSH timeout (drive %d)", sel);
+        return -1;
+    }
+    klogf(KLOG_DEBUG, "ata: wrote %u sector(s) at lba %u (drive %d)",
+          count, lba, sel);
+    return 0;
 }

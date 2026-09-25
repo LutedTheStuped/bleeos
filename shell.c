@@ -894,7 +894,7 @@ static const char MAN_INSTALL[] =
     "install - Debian-like OS installer (TUI)\nUsage: install\n"
     "Stepped wizard (root only): welcome, hostname, root\n"
     "password, optional user, disk confirm, progress bar.\n"
-    "Writes boot sector + kernel (161 sectors) to LBA 0 of\n"
+    "Writes boot sector + kernel (193 sectors) to LBA 0 of\n"
     "the ATA primary master and verifies. Hostname, users\n"
     "and passwords persist on installed systems.\n";
 static const char MAN_USERS[] =
@@ -1033,12 +1033,17 @@ static int b_vgaregs(int argc, char **argv, const char *in) {
 
 static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)argv; (void)in;
     vga_print("Starting GUI...\n");
+    klogf(KLOG_INFO, "gui: starting the desktop session (VBE + PS/2)");
     int r = wm_init();
     if (r) {
+        klogf(KLOG_WARN, "gui: startup failed (%s)",
+              r == 2 ? "PS/2 mouse init failed" : "VBE unavailable");
         sh_eprint(r == 2 ? "gui: PS/2 mouse init failed, retry gui\n"
                          : "gui: VBE unavailable (need -vga std)\n");
         return 1;
     }
+    klogf(KLOG_INFO, "gui: desktop up %dx%dx%d", vbe_width(), vbe_height(),
+          vbe_bpp());
     for (;;) {
         if (!login_run()) break;   /* Esc: back to shell */
         wm_run();                  /* Esc/log out: back to login */
@@ -1046,18 +1051,19 @@ static int b_gui(int argc, char **argv, const char *in) {    (void)argc; (void)a
     vbe_disable();
     vga_clear();  /* VRAM content is lost across the VBE switch */
     vga_setcursor(vga_row(), vga_col());
+    klogf(KLOG_INFO, "gui: session closed, back at the shell prompt");
     return 0;
 }
 
 /* installer image: MBR + stage2 as loaded by the bootloader, still
  * intact in RAM (nothing reuses 0x7C00+ after boot) */
 #define INSTALL_SRC ((const u8 *)0x7C00u)
-#define INSTALL_SECTORS 161   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
+#define INSTALL_SECTORS 193   /* 1 MBR + STAGE2_SECTORS (see Makefile) */
 /* snapshot area: free RAM above the kernel, below the stack.
  * (Was 0x30000; the kernel's .bss grew past it and the snapshot
  * trashed cap_active/devs/etc. Guarded below against recurrence.) */
 #define INSTALL_SNAP ((u8 *)0x40000u)
-#define INSTALL_SNAP_END ((u8 *)0x54200u)   /* +161 sectors, worst case */
+#define INSTALL_SNAP_END ((u8 *)0x58200u)   /* +193 sectors, worst case */
 
 static int b_install(int argc, char **argv, const char *in) {
     (void)argc; (void)argv; (void)in;
@@ -1071,7 +1077,10 @@ static int b_install(int argc, char **argv, const char *in) {
         return 1;
     }
     if (d.sectors < INSTALL_SECTORS) {
-        sh_eprint("install: disk too small (need 161 sectors)\n");
+        char need[12];
+        sh_eprint("install: disk too small (need ");
+        sh_eprint(sutoa(INSTALL_SECTORS, need, 10, 0));
+        sh_eprint(" sectors)\n");
         return 1;
     }
     if (INSTALL_SRC[510] != 0x55 || INSTALL_SRC[511] != 0xAA) {
@@ -1090,6 +1099,8 @@ static int b_install(int argc, char **argv, const char *in) {
             vga_clear();
             return 1;
         }
+        klogf(KLOG_INFO, "install: wizard started, %d sectors to write",
+              INSTALL_SECTORS);
     }
     /* 2. hostname */
     {
@@ -1114,6 +1125,7 @@ static int b_install(int argc, char **argv, const char *in) {
                 tui_msg("Hostname", "Invalid name. Try again (Esc aborts).");
         }
         shell_fwrite("/etc/hostname", hn, slen(hn));
+        klogf(KLOG_INFO, "install: hostname set to \"%s\"", hn);
     }
     /* 3. root password */
     {
@@ -1127,6 +1139,7 @@ static int b_install(int argc, char **argv, const char *in) {
             return 1;
         }
         smemset(nw, 0, sizeof(nw));
+        klogf(KLOG_INFO, "install: root password set (not logged)");
     }
     /* 4. optional normal user */
     {
@@ -1156,6 +1169,7 @@ static int b_install(int argc, char **argv, const char *in) {
                 return 1;
             }
             smemset(nw, 0, sizeof(nw));
+            klogf(KLOG_INFO, "install: user \"%s\" created", name);
         }
     }
     /* 5. disk confirm */
@@ -1178,8 +1192,11 @@ static int b_install(int argc, char **argv, const char *in) {
         if (tui_menu("Target disk", body, items, 2) != 0) {
             vga_clear();
             sh_print("Aborted.\n");
+            klogf(KLOG_WARN, "install: aborted at the disk confirmation");
             return 1;
         }
+        klogf(KLOG_WARN, "install: target confirmed - %u sectors will be erased",
+              (u32)INSTALL_SECTORS);
     }
     /* 6. write + verify with progress */
     tui_progress("Installing", "Writing system...");
@@ -1187,6 +1204,8 @@ static int b_install(int argc, char **argv, const char *in) {
         extern char __bss_end;
         if ((u32)INSTALL_SNAP < (u32)&__bss_end ||
             (u32)INSTALL_SNAP_END >= 0x90000u) {
+            klogf(KLOG_ERROR, "install: scratch 0x%X..0x%X overlaps kernel/stack",
+                  (u32)INSTALL_SNAP, (u32)INSTALL_SNAP_END);
             tui_msg("Error", "scratch overlaps kernel/stack");
             vga_clear();
             return 1;
@@ -1194,28 +1213,37 @@ static int b_install(int argc, char **argv, const char *in) {
     }
     for (u32 i = 0; i < INSTALL_SECTORS * 512; i++)
         INSTALL_SNAP[i] = INSTALL_SRC[i];
+    klogf(KLOG_DEBUG, "install: image copied to the scratch area @0x%X",
+          (u32)INSTALL_SNAP);
     for (u32 s = 0; s < INSTALL_SECTORS;) {
         u32 n = INSTALL_SECTORS - s;
         if (n > 32) n = 32;
         if (ata_write(0, s, INSTALL_SNAP + s * 512, n)) {
+            klogf(KLOG_ERROR, "install: write failed at sector %u of %d",
+                  s, INSTALL_SECTORS);
             tui_msg("Error", "write failed; disk may be bad");
             vga_clear();
             return 1;
         }
         s += n;
+        klogf(KLOG_DEBUG, "install: wrote %u/%d sectors", s, INSTALL_SECTORS);
         tui_progress_update((int)(s * 70 / INSTALL_SECTORS));
     }
+    klogf(KLOG_INFO, "install: %d sectors written to LBA 0", INSTALL_SECTORS);
     tui_progress("Installing", "Verifying...");
     {
         u8 sec[512];
         for (u32 s = 0; s < INSTALL_SECTORS; s++) {
             if (ata_read(0, s, sec, 1)) {
+                klogf(KLOG_ERROR, "install: read-back failed at sector %u", s);
                 tui_msg("Error", "read-back failed");
                 vga_clear();
                 return 1;
             }
             for (u32 i = 0; i < 512; i++) {
                 if (sec[i] != INSTALL_SNAP[s * 512 + i]) {
+                    klogf(KLOG_ERROR, "install: verify mismatch at sector %u, byte %u",
+                          s, i);
                     tui_msg("Error", "verify mismatch");
                     vga_clear();
                     return 1;
@@ -1224,14 +1252,18 @@ static int b_install(int argc, char **argv, const char *in) {
             tui_progress_update(70 + (int)(s * 30 / INSTALL_SECTORS));
         }
     }
+    klogf(KLOG_INFO, "install: read-back verify OK for %d sectors",
+          INSTALL_SECTORS);
     /* persist hostname+users collected above (live media: the
      * session hooks are no-ops, so flush explicitly) */
     if (users_flush()) {
+        klogf(KLOG_ERROR, "install: user DB was NOT saved to LBA 256..260");
         tui_msg("Error", "system is on the disk but user\n"
                 "settings were NOT saved");
         vga_clear();
         return 1;
     }
+    klogf(KLOG_INFO, "install: user DB flushed to LBA 256..260");
     /* 7. done */
     {
         static const char *items[] = { "Reboot now", "Back to shell" };
@@ -1399,7 +1431,11 @@ static int b_usb(int argc, char **argv, const char *in) {
 
 static int dispatch(int argc, char **argv, const char *in) {
     for (const cmd_t *c = cmds; c->name; c++)
-        if (scmp(c->name, argv[0]) == 0) return c->fn(argc, argv, in);
+        if (scmp(c->name, argv[0]) == 0) {
+            klogf(KLOG_DEBUG, "sh: %s (%d arg(s))", c->name, argc - 1);
+            return c->fn(argc, argv, in);
+        }
+    klogf(KLOG_WARN, "sh: command not found: %s", argv[0]);
     sh_eprint(argv[0]);
     sh_eprint(": command not found\n");
     return 127;
@@ -1448,6 +1484,9 @@ static int run_line(char *line) {
         else if (segs[i].op == OP_AND) run = last_status == 0;
         else if (segs[i].op == OP_OR) run = last_status != 0;
         if (run) {
+            /* log before tokenize() overwrites the segment in place */
+            if (segs[i].text[0])
+                klogf(KLOG_DEBUG, "sh: run: %s", segs[i].text);
             int st = run_segment(segs[i].text);
             if (st >= 0) last_status = st;   /* blank segs keep $? */
         }
@@ -1547,7 +1586,8 @@ static int shell_login(void) {
         vga_print(" login: ");
         vga_setcolor(0x07);
         int r = shell_readline(user);
-        if (r == -1) { vga_print("exit\n"); return -1; }
+        if (r == -1) { vga_print("exit\n");
+            klogf(KLOG_INFO, "sh: EOF at the login prompt"); return -1; }
         if (r == -2) { vga_print("^C\n"); continue; }
         if (!user[0]) continue;
         vga_print("Password: ");
@@ -1557,9 +1597,12 @@ static int shell_login(void) {
         if (ok) {
             int uid = users_uid(user);
             set_session(user, uid < 0 ? 0 : uid);
+            klogf(KLOG_INFO, "auth: user \"%s\" logged in (uid %d)", user,
+                  uid < 0 ? 0 : uid);
             vga_print("\n");
             return 0;
         }
+        klogf(KLOG_WARN, "auth: login failed for user \"%s\"", user);
         vga_print("\nLogin incorrect\n");
     }
 }
@@ -1569,6 +1612,13 @@ void shell_run(u32 boot_sec, int verbose) {
     g_boot_sec = boot_sec;
     fs_init();
     users_init();   /* seed root if the DB is absent */
+    {
+        int used = 0;
+        for (int i = 0; i < FS_MAX; i++) if (fs[i].used) used++;
+        klogf(KLOG_INFO, "fs: ramfs mounted on / - %d of %d nodes in use",
+              used, FS_MAX);
+    }
+    klogf(KLOG_INFO, "sh: shell up, waiting for login");
     smemset(envs, 0, sizeof(envs));
     smemset(hist, 0, sizeof(hist));
     hcount = 0;
@@ -1594,7 +1644,9 @@ void shell_run(u32 boot_sec, int verbose) {
             vga_setcolor(0x07);
             vga_print(cur_uid == 0 ? "# " : "$ ");
             int r = shell_readline(line);
-            if (r == -1) { vga_print("logout\n"); break; }
+            if (r == -1) { vga_print("logout\n");
+                klogf(KLOG_INFO, "sh: session \"%s\" logged out", cur_user);
+                break; }
             if (r == -2) { vga_print("^C\n"); last_status = 130; continue; }
             if (!line[0]) continue;
             hist_add(line);

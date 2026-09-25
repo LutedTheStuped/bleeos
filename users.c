@@ -23,8 +23,15 @@ void users_set_installed(int on) {
     ata_dev_t d;
     persist = 0;
     if (!on) return;
-    if (ata_info(0, &d)) return;
-    if (d.sectors < UDISK_LBA + UDISK_NSEC) return;
+    if (ata_info(0, &d)) {
+        klogf(KLOG_WARN, "users: installed, but no primary master - volatile DB");
+        return;
+    }
+    if (d.sectors < UDISK_LBA + UDISK_NSEC) {
+        klogf(KLOG_WARN, "users: disk too small for the user DB (need LBA %d+%d)",
+              UDISK_LBA, UDISK_NSEC);
+        return;
+    }
     persist = 1;
 }
 
@@ -237,10 +244,17 @@ static int line_cred(const char *file, int off,
 
 void users_init(void) {
     char buf[768];
-    if (persist && users_load() == 0) return;   /* restored from disk */
-    if (shell_fread("/etc/passwd", buf, sizeof(buf)) >= 0 &&
-        shell_fread("/etc/shadow", buf, sizeof(buf)) >= 0)
+    if (persist && users_load() == 0) {     /* restored from disk */
+        klogf(KLOG_INFO, "users: DB restored from the disk (LBA %d, %d sectors)",
+              UDISK_LBA, UDISK_NSEC);
         return;
+    }
+    if (shell_fread("/etc/passwd", buf, sizeof(buf)) >= 0 &&
+        shell_fread("/etc/shadow", buf, sizeof(buf)) >= 0) {
+        klogf(KLOG_DEBUG, "users: ramfs /etc/passwd + /etc/shadow already present");
+        return;
+    }
+    klogf(KLOG_INFO, "users: no user DB yet, seeding root with a fresh salt");
     shell_fwrite("/etc/passwd", "root:0:0\n", 9);
     char salt[5], hash[9], line[64];
     mksalt(salt);

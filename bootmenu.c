@@ -63,7 +63,7 @@ static void draw_footer(const char *cmdline) {
     vga_print(cmdline);
     vga_setcolor(0x07);
     vga_print("\n\n  Keys: Up/Down or j/k select, 1-4 boot, Enter boot default,\n"
-              "        E edit cmdline\n");
+              "        E edit cmdline (`klog=vga` mirrors the log here too)\n");
 }
 
 static void edit_cmdline(char *cmdline) {
@@ -76,6 +76,9 @@ static void edit_cmdline(char *cmdline) {
         int i = 0;
         while (buf[i] && i < 127) { cmdline[i] = buf[i]; i++; }
         cmdline[i] = 0;
+        klogf(KLOG_INFO, "boot: cmdline of this entry now \"%s\"", cmdline);
+    } else {
+        klogf(KLOG_DEBUG, "boot: cmdline edit cancelled");
     }
 }
 
@@ -127,6 +130,14 @@ void boot_main(void) {
     info.boot_sec = rtc_seconds();
     info.boot_drive = *(volatile u8 *)0x7D3B;
 
+    klog_init();                       /* COM1 up + uptime base (once) */
+    klogf(KLOG_INFO, "boot: stage2 entered at 0x7E00, drive 0x%02X (%s)",
+          info.boot_drive, info.boot_drive & 0x80 ? "hard disk" : "removable");
+    klogf(KLOG_INFO, "boot: BleeOS boot manager: %d entries, 5.0 s timeout",
+          NENTRIES);
+    klogf(KLOG_INFO, "boot: rtc epoch %u s at menu start", info.boot_sec);
+    klogf(KLOG_INFO, "boot: edit an entry (E) to add `verbose` or `klog=vga`");
+
     static char cmdlines[2][128];
     for (int e = 0; e < 2; e++) {
         int i = 0;
@@ -136,10 +147,16 @@ void boot_main(void) {
 
     for (;;) {
         int sel = menu_loop(cmdlines);
-        if (sel < 0) sel = 0;               /* timeout -> default */
+        if (sel < 0) {                       /* timeout -> default */
+            klogf(KLOG_INFO, "boot: 5 s timeout, booting the default entry");
+            sel = 0;
+        } else {
+            klogf(KLOG_INFO, "boot: entry %d selected: %s", sel, titles[sel]);
+        }
 
         if (sel == 2) reboot();
         if (sel == 3) {
+            klogf(KLOG_INFO, "boot: power off requested from the menu");
             vga_clear();
             vga_print("Halted. You can close QEMU.\n");
             halt_cpu();
@@ -149,7 +166,11 @@ void boot_main(void) {
         int i = 0;
         while (cmdlines[sel][i]) { info.cmdline[i] = cmdlines[sel][i]; i++; }
         info.cmdline[i] = 0;
+        klogf(KLOG_INFO, "boot: kernel cmdline \"%s\"",
+              info.cmdline[0] ? info.cmdline : "(empty)");
 
+        klogf(KLOG_INFO, "boot: calling kernel_main(&info)");
         kernel_main(&info);     /* returns when the shell runs `exit` */
+        klogf(KLOG_INFO, "boot: kernel_main returned, redrawing the menu");
     }
 }
